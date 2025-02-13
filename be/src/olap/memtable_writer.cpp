@@ -65,32 +65,29 @@ MemTableWriter::~MemTableWriter() {
 Status MemTableWriter::init(std::shared_ptr<RowsetWriter> rowset_writer,
                             TabletSchemaSPtr tablet_schema,
                             std::shared_ptr<PartialUpdateInfo> partial_update_info,
-                            bool unique_key_mow) {
+                            std::shared_ptr<WorkloadGroup> wg_sptr, bool unique_key_mow) {
     _rowset_writer = rowset_writer;
     _tablet_schema = tablet_schema;
     _unique_key_mow = unique_key_mow;
     _partial_update_info = partial_update_info;
+    _resource_ctx = thread_context()->resource_ctx();
 
     _reset_mem_table();
 
     // create flush handler
     // by assigning segment_id to memtable before submiting to flush executor,
     // we can make sure same keys sort in the same order in all replicas.
-    bool should_serial = false;
-    RETURN_IF_ERROR(StorageEngine::instance()->memtable_flush_executor()->create_flush_token(
-            _flush_token, _rowset_writer.get(), should_serial, _req.is_high_priority));
+    RETURN_IF_ERROR(
+            ExecEnv::GetInstance()->storage_engine().memtable_flush_executor()->create_flush_token(
+                    _flush_token, _rowset_writer, _req.is_high_priority, wg_sptr));
 
     _is_init = true;
     return Status::OK();
 }
 
-Status MemTableWriter::append(const vectorized::Block* block) {
-    return write(block, {}, true);
-}
-
-Status MemTableWriter::write(const vectorized::Block* block, const std::vector<int>& row_idxs,
-                             bool is_append) {
-    if (UNLIKELY(row_idxs.empty() && !is_append)) {
+Status MemTableWriter::write(const vectorized::Block* block,
+                             const std::vector<uint32_t>& row_idxs) {
+    if (UNLIKELY(row_idxs.empty())) {
         return Status::OK();
     }
     _lock_watch.start();
@@ -107,12 +104,21 @@ Status MemTableWriter::write(const vectorized::Block* block, const std::vector<i
                                              _req.tablet_id, _req.load_id.hi(), _req.load_id.lo());
     }
 
-    if (is_append) {
-        _total_received_rows += block->rows();
-    } else {
-        _total_received_rows += row_idxs.size();
+    _total_received_rows += row_idxs.size();
+    auto st = _mem_table->insert(block, row_idxs);
+
+    // Reset memtable immediately after insert failure to prevent potential flush operations.
+    // This is a defensive measure because:
+    // 1. When insert fails (e.g., memory allocation failure during add_rows),
+    //    the memtable is in an inconsistent state and should not be flushed
+    // 2. However, memory pressure might trigger a flush operation on this failed memtable
+    // 3. By resetting here, we ensure the failed memtable won't be included in any subsequent flush,
+    //    thus preventing potential crashes
+    if (!st.ok()) [[unlikely]] {
+        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        _mem_table.reset();
+        return st;
     }
-    _mem_table->insert(block, row_idxs, is_append);
 
     if (UNLIKELY(_mem_table->need_agg() && config::enable_shrink_memory)) {
         _mem_table->shrink_memtable_by_agg();
@@ -130,11 +136,26 @@ Status MemTableWriter::write(const vectorized::Block* block, const std::vector<i
 
 Status MemTableWriter::_flush_memtable_async() {
     DCHECK(_flush_token != nullptr);
-    return _flush_token->submit(std::move(_mem_table));
+    std::shared_ptr<MemTable> memtable;
+    {
+        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        memtable = _mem_table;
+        _mem_table = nullptr;
+    }
+    {
+        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        memtable->update_mem_type(MemType::WRITE_FINISHED);
+        _freezed_mem_tables.push_back(memtable);
+    }
+    return _flush_token->submit(memtable);
 }
 
 Status MemTableWriter::flush_async() {
     std::lock_guard<std::mutex> l(_lock);
+    // Two calling paths:
+    // 1. call by local, from `VTabletWriterV2::_write_memtable`.
+    // 2. call by remote, from `LoadChannelMgr::_get_load_channel`.
+    SCOPED_SWITCH_RESOURCE_CONTEXT(_resource_ctx);
     if (!_is_init || _is_closed) {
         // This writer is uninitialized or closed before flushing, do nothing.
         // We return OK instead of NOT_INITIALIZED or ALREADY_CLOSED.
@@ -148,8 +169,8 @@ Status MemTableWriter::flush_async() {
     }
 
     VLOG_NOTICE << "flush memtable to reduce mem consumption. memtable size: "
-                << _mem_table->memory_usage() << ", tablet: " << _req.tablet_id
-                << ", load id: " << print_id(_req.load_id);
+                << PrettyPrinter::print_bytes(_mem_table->memory_usage())
+                << ", tablet: " << _req.tablet_id << ", load id: " << print_id(_req.load_id);
     auto s = _flush_memtable_async();
     _reset_mem_table();
     return s;
@@ -173,33 +194,11 @@ Status MemTableWriter::wait_flush() {
 }
 
 void MemTableWriter::_reset_mem_table() {
-#ifndef BE_TEST
-    auto mem_table_insert_tracker = std::make_shared<MemTracker>(
-            fmt::format("MemTableManualInsert:TabletId={}:MemTableNum={}#loadID={}",
-                        std::to_string(tablet_id()), _mem_table_num,
-                        UniqueId(_req.load_id).to_string()),
-            ExecEnv::GetInstance()->memtable_memory_limiter()->mem_tracker());
-    auto mem_table_flush_tracker = std::make_shared<MemTracker>(
-            fmt::format("MemTableHookFlush:TabletId={}:MemTableNum={}#loadID={}",
-                        std::to_string(tablet_id()), _mem_table_num++,
-                        UniqueId(_req.load_id).to_string()),
-            ExecEnv::GetInstance()->memtable_memory_limiter()->mem_tracker());
-#else
-    auto mem_table_insert_tracker = std::make_shared<MemTracker>(fmt::format(
-            "MemTableManualInsert:TabletId={}:MemTableNum={}#loadID={}",
-            std::to_string(tablet_id()), _mem_table_num, UniqueId(_req.load_id).to_string()));
-    auto mem_table_flush_tracker = std::make_shared<MemTracker>(fmt::format(
-            "MemTableHookFlush:TabletId={}:MemTableNum={}#loadID={}", std::to_string(tablet_id()),
-            _mem_table_num++, UniqueId(_req.load_id).to_string()));
-#endif
     {
-        std::lock_guard<SpinLock> l(_mem_table_tracker_lock);
-        _mem_table_insert_trackers.push_back(mem_table_insert_tracker);
-        _mem_table_flush_trackers.push_back(mem_table_flush_tracker);
+        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        _mem_table.reset(new MemTable(_req.tablet_id, _tablet_schema, _req.slots, _req.tuple_desc,
+                                      _unique_key_mow, _partial_update_info.get()));
     }
-    _mem_table.reset(new MemTable(_req.tablet_id, _tablet_schema.get(), _req.slots, _req.tuple_desc,
-                                  _unique_key_mow, _partial_update_info.get(),
-                                  mem_table_insert_tracker, mem_table_flush_tracker));
 
     _segment_num++;
 }
@@ -221,7 +220,10 @@ Status MemTableWriter::close() {
     }
 
     auto s = _flush_memtable_async();
-    _mem_table.reset();
+    {
+        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        _mem_table.reset();
+    }
     _is_closed = true;
     if (UNLIKELY(!s.ok())) {
         return s;
@@ -250,8 +252,6 @@ Status MemTableWriter::_do_close_wait() {
         LOG(WARNING) << "previous flush failed tablet " << _req.tablet_id;
         return st;
     }
-
-    _mem_table.reset();
 
     if (_rowset_writer->num_rows() + _flush_token->memtable_stat().merged_rows !=
         _total_received_rows) {
@@ -319,7 +319,10 @@ Status MemTableWriter::cancel_with_status(const Status& st) {
     if (_is_cancelled) {
         return Status::OK();
     }
-    _mem_table.reset();
+    {
+        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        _mem_table.reset();
+    }
     if (_flush_token != nullptr) {
         // cancel and wait all memtables in flush queue to be finished
         _flush_token->cancel();
@@ -333,6 +336,10 @@ const FlushStatistic& MemTableWriter::get_flush_token_stats() {
     return _flush_token->get_stats();
 }
 
+uint64_t MemTableWriter::flush_running_count() const {
+    return _flush_token == nullptr ? 0 : _flush_token->get_stats().flush_running_count.load();
+}
+
 int64_t MemTableWriter::mem_consumption(MemType mem) {
     if (!_is_init) {
         // This method may be called before this writer is initialized.
@@ -341,15 +348,11 @@ int64_t MemTableWriter::mem_consumption(MemType mem) {
     }
     int64_t mem_usage = 0;
     {
-        std::lock_guard<SpinLock> l(_mem_table_tracker_lock);
-        if ((mem & MemType::WRITE) == MemType::WRITE) { // 3 & 2 = 2
-            for (const auto& mem_table_tracker : _mem_table_insert_trackers) {
-                mem_usage += mem_table_tracker->consumption();
-            }
-        }
-        if ((mem & MemType::FLUSH) == MemType::FLUSH) { // 3 & 1 = 1
-            for (const auto& mem_table_tracker : _mem_table_flush_trackers) {
-                mem_usage += mem_table_tracker->consumption();
+        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        for (const auto& mem_table : _freezed_mem_tables) {
+            auto mem_table_sptr = mem_table.lock();
+            if (mem_table_sptr != nullptr && mem_table_sptr->get_mem_type() == mem) {
+                mem_usage += mem_table_sptr->memory_usage();
             }
         }
     }
@@ -357,6 +360,7 @@ int64_t MemTableWriter::mem_consumption(MemType mem) {
 }
 
 int64_t MemTableWriter::active_memtable_mem_consumption() {
+    std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
     return _mem_table != nullptr ? _mem_table->memory_usage() : 0;
 }
 

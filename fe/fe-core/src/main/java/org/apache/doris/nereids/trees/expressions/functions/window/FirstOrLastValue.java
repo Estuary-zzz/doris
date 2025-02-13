@@ -18,38 +18,64 @@
 package org.apache.doris.nereids.trees.expressions.functions.window;
 
 import org.apache.doris.catalog.FunctionSignature;
+import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.functions.AlwaysNullable;
 import org.apache.doris.nereids.trees.expressions.functions.ExplicitlyCastableSignature;
-import org.apache.doris.nereids.trees.expressions.shape.UnaryExpression;
+import org.apache.doris.nereids.trees.expressions.literal.BooleanLiteral;
+import org.apache.doris.nereids.types.BooleanType;
 import org.apache.doris.nereids.types.coercion.AnyDataType;
 
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 
-/** parent class for first_value() and last_value() */
+/**
+ * parent class for first_value() and last_value()
+ */
 public abstract class FirstOrLastValue extends WindowFunction
-        implements UnaryExpression, AlwaysNullable, ExplicitlyCastableSignature {
+        implements AlwaysNullable, ExplicitlyCastableSignature {
 
     private static final List<FunctionSignature> SIGNATURES = ImmutableList.of(
-            FunctionSignature.retArgType(0).args(AnyDataType.INSTANCE_WITHOUT_INDEX)
+            FunctionSignature.retArgType(0).args(AnyDataType.INSTANCE_WITHOUT_INDEX),
+            FunctionSignature.retArgType(0).args(AnyDataType.INSTANCE_WITHOUT_INDEX, BooleanType.INSTANCE)
     );
+
+    public FirstOrLastValue(String name, Expression child, Expression ignoreNullValue) {
+        super(name, child, ignoreNullValue);
+    }
 
     public FirstOrLastValue(String name, Expression child) {
         super(name, child);
     }
 
+    public FirstOrLastValue(String name, List<Expression> children) {
+        super(name, children);
+    }
+
     public FirstOrLastValue reverse() {
         if (this instanceof FirstValue) {
-            return new LastValue(child());
+            return new LastValue(children);
         } else {
-            return new FirstValue(child());
+            return new FirstValue(children);
         }
     }
 
     @Override
     public List<FunctionSignature> getSignatures() {
         return SIGNATURES;
+    }
+
+    /**check the second parameter must be true or false*/
+    public static void checkSecondParameter(FirstOrLastValue firstOrLastValue) {
+        if (1 == firstOrLastValue.arity()) {
+            return;
+        }
+        if (!BooleanLiteral.TRUE.equals(firstOrLastValue.child(1))
+                && !BooleanLiteral.FALSE.equals(firstOrLastValue.child(1))) {
+            throw new AnalysisException("The second parameter of " + firstOrLastValue.getName()
+                    + " must be a constant or a constant expression, and the result of "
+                    + "the calculated constant or constant expression must be true or false.");
+        }
     }
 }

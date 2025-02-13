@@ -24,26 +24,23 @@
 #include "runtime/types.h"
 
 namespace doris::vectorized {
+#include "common/compile_check_begin.h"
 
 AvroJNIReader::AvroJNIReader(RuntimeState* state, RuntimeProfile* profile,
                              const TFileScanRangeParams& params,
                              const std::vector<SlotDescriptor*>& file_slot_descs,
                              const TFileRangeDesc& range)
-        : _file_slot_descs(file_slot_descs),
-          _state(state),
-          _profile(profile),
-          _params(params),
-          _range(range) {}
+        : JniReader(file_slot_descs, state, profile), _params(params), _range(range) {}
 
 AvroJNIReader::AvroJNIReader(RuntimeProfile* profile, const TFileScanRangeParams& params,
                              const TFileRangeDesc& range,
                              const std::vector<SlotDescriptor*>& file_slot_descs)
-        : _file_slot_descs(file_slot_descs), _profile(profile), _params(params), _range(range) {}
+        : JniReader(file_slot_descs, nullptr, profile), _params(params), _range(range) {}
 
 AvroJNIReader::~AvroJNIReader() = default;
 
 Status AvroJNIReader::get_next_block(Block* block, size_t* read_rows, bool* eof) {
-    RETURN_IF_ERROR(_jni_connector->get_nex_block(block, read_rows, eof));
+    RETURN_IF_ERROR(_jni_connector->get_next_block(block, read_rows, eof));
     if (*eof) {
         RETURN_IF_ERROR(_jni_connector->close());
     }
@@ -52,7 +49,7 @@ Status AvroJNIReader::get_next_block(Block* block, size_t* read_rows, bool* eof)
 
 Status AvroJNIReader::get_columns(std::unordered_map<std::string, TypeDescriptor>* name_to_type,
                                   std::unordered_set<std::string>* missing_cols) {
-    for (auto& desc : _file_slot_descs) {
+    for (const auto& desc : _file_slot_descs) {
         name_to_type->emplace(desc->col_name(), desc->type());
     }
     return Status::OK();
@@ -65,7 +62,7 @@ Status AvroJNIReader::init_fetch_table_reader(
     std::ostringstream columns_types;
     std::vector<std::string> column_names;
     int index = 0;
-    for (auto& desc : _file_slot_descs) {
+    for (const auto& desc : _file_slot_descs) {
         std::string field = desc->col_name();
         column_names.emplace_back(field);
         std::string type = JniConnector::get_jni_type(desc->type());
@@ -89,6 +86,10 @@ Status AvroJNIReader::init_fetch_table_reader(
     if (type == TFileType::FILE_S3) {
         required_param.insert(_params.properties.begin(), _params.properties.end());
     }
+    required_param.insert(
+            std::make_pair("split_start_offset", std::to_string(_range.start_offset)));
+    required_param.insert(std::make_pair("split_size", std::to_string(_range.size)));
+    required_param.insert(std::make_pair("split_file_size", std::to_string(_range.file_size)));
     required_param.insert(std::make_pair("uri", _range.path));
     _jni_connector = std::make_unique<JniConnector>("org/apache/doris/avro/AvroJNIScanner",
                                                     required_param, column_names);
@@ -96,7 +97,7 @@ Status AvroJNIReader::init_fetch_table_reader(
     return _jni_connector->open(_state, _profile);
 }
 
-TFileType::type AvroJNIReader::get_file_type() {
+TFileType::type AvroJNIReader::get_file_type() const {
     TFileType::type type;
     if (_range.__isset.file_type) {
         // for compatibility
@@ -128,7 +129,7 @@ Status AvroJNIReader::get_parsed_schema(std::vector<std::string>* col_names,
     if (document.IsArray()) {
         for (int i = 0; i < document.Size(); ++i) {
             rapidjson::Value& column_schema = document[i];
-            col_names->push_back(column_schema["name"].GetString());
+            col_names->emplace_back(column_schema["name"].GetString());
             col_types->push_back(convert_to_doris_type(column_schema));
         }
     }
@@ -175,4 +176,5 @@ TypeDescriptor AvroJNIReader::convert_to_doris_type(const rapidjson::Value& colu
     }
 }
 
+#include "common/compile_check_end.h"
 } // namespace doris::vectorized

@@ -23,7 +23,6 @@ import org.apache.doris.common.exception.UdfRuntimeException;
 import org.apache.doris.common.jni.utils.JavaUdfDataType;
 import org.apache.doris.common.jni.utils.OffHeap;
 import org.apache.doris.common.jni.utils.UdfUtils;
-import org.apache.doris.common.jni.vec.ColumnValueConverter;
 import org.apache.doris.common.jni.vec.VectorTable;
 import org.apache.doris.thrift.TJavaUdfExecutorCtorParams;
 
@@ -51,11 +50,18 @@ public class UdafExecutor extends BaseExecutor {
 
     private static final Logger LOG = Logger.getLogger(UdafExecutor.class);
 
+    private static final String UDAF_CREATE_FUNCTION = "create";
+    private static final String UDAF_DESTROY_FUNCTION = "destroy";
+    private static final String UDAF_ADD_FUNCTION = "add";
+    private static final String UDAF_RESET_FUNCTION = "reset";
+    private static final String UDAF_SERIALIZE_FUNCTION = "serialize";
+    private static final String UDAF_DESERIALIZE_FUNCTION = "deserialize";
+    private static final String UDAF_MERGE_FUNCTION = "merge";
+    private static final String UDAF_RESULT_FUNCTION = "getValue";
+
     private HashMap<String, Method> allMethods;
     private HashMap<Long, Object> stateObjMap;
-    private Class retClass;
     private int addIndex;
-    private VectorTable outputTable = null;
 
     /**
      * Constructor to create an object.
@@ -69,25 +75,9 @@ public class UdafExecutor extends BaseExecutor {
      */
     @Override
     public void close() {
-        if (outputTable != null) {
-            outputTable.close();
-        }
         super.close();
-    }
-
-    private Map<Integer, ColumnValueConverter> getInputConverters(int numColumns) {
-        Map<Integer, ColumnValueConverter> converters = new HashMap<>();
-        for (int j = 0; j < numColumns; ++j) {
-            ColumnValueConverter converter = getInputConverter(argTypes[j].getPrimitiveType(), argClass[j + 1]);
-            if (converter != null) {
-                converters.put(j, converter);
-            }
-        }
-        return converters;
-    }
-
-    private ColumnValueConverter getOutputConverter() {
-        return getOutputConverter(retType.getPrimitiveType(), retClass);
+        allMethods = null;
+        stateObjMap = null;
     }
 
     public void addBatch(boolean isSinglePlace, int rowStart, int rowEnd, long placeAddr, int offset,
@@ -95,7 +85,7 @@ public class UdafExecutor extends BaseExecutor {
         try {
             VectorTable inputTable = VectorTable.createReadableTable(inputParams);
             Object[][] inputs = inputTable.getMaterializedData(rowStart, rowEnd,
-                    getInputConverters(inputTable.getNumColumns()));
+                    getInputConverters(inputTable.getNumColumns(), true));
             if (isSinglePlace) {
                 addBatchSingle(rowStart, rowEnd, placeAddr, inputs);
             } else {
@@ -318,7 +308,9 @@ public class UdafExecutor extends BaseExecutor {
                         Pair<Boolean, JavaUdfDataType> returnType = UdfUtils.setReturnType(funcRetType,
                                 methods[idx].getReturnType());
                         if (!returnType.first) {
-                            LOG.debug("result function set return parameterTypes has error");
+                            if (LOG.isDebugEnabled()) {
+                                LOG.debug("result function set return parameterTypes has error");
+                            }
                         } else {
                             retType = returnType.second;
                             retClass = methods[idx].getReturnType();
@@ -330,14 +322,18 @@ public class UdafExecutor extends BaseExecutor {
                         addIndex = methodAccess.getIndex(UDAF_ADD_FUNCTION);
                         argClass = methods[idx].getParameterTypes();
                         if (argClass.length != parameterTypes.length + 1) {
-                            LOG.debug("add function parameterTypes length not equal " + argClass.length + " "
-                                    + parameterTypes.length + " " + methods[idx].getName());
+                            if (LOG.isDebugEnabled()) {
+                                LOG.debug("add function parameterTypes length not equal " + argClass.length + " "
+                                        + parameterTypes.length + " " + methods[idx].getName());
+                            }
                         }
                         if (!(parameterTypes.length == 0)) {
                             Pair<Boolean, JavaUdfDataType[]> inputType = UdfUtils.setArgTypes(parameterTypes,
                                     argClass, true);
                             if (!inputType.first) {
-                                LOG.debug("add function set arg parameterTypes has error");
+                                if (LOG.isDebugEnabled()) {
+                                    LOG.debug("add function set arg parameterTypes has error");
+                                }
                             } else {
                                 argTypes = inputType.second;
                             }

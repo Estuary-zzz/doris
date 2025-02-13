@@ -27,12 +27,13 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.Comparator;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-public class AnalysisTaskExecutor extends Thread {
+public class AnalysisTaskExecutor {
 
     private static final Logger LOG = LogManager.getLogger(AnalysisTaskExecutor.class);
 
@@ -43,24 +44,21 @@ public class AnalysisTaskExecutor extends Thread {
                     Comparator.comparingLong(AnalysisTaskWrapper::getStartTime));
 
     public AnalysisTaskExecutor(int simultaneouslyRunningTaskNum) {
+        this(simultaneouslyRunningTaskNum, Integer.MAX_VALUE, "Analysis Job Executor");
+    }
+
+    public AnalysisTaskExecutor(int simultaneouslyRunningTaskNum, int taskQueueSize, String poolName) {
         if (!Env.isCheckpointThread()) {
             executors = ThreadPoolManager.newDaemonThreadPool(
                     simultaneouslyRunningTaskNum,
                     simultaneouslyRunningTaskNum, 0,
-                    TimeUnit.DAYS, new LinkedBlockingQueue<>(),
-                    new BlockedPolicy("Analysis Job Executor", Integer.MAX_VALUE),
-                    "Analysis Job Executor", true);
+                    TimeUnit.DAYS, new LinkedBlockingQueue<>(taskQueueSize),
+                    new BlockedPolicy("Analysis Job Executor Block Policy", Integer.MAX_VALUE),
+                    poolName, true);
+            cancelExpiredTask();
         } else {
             executors = null;
         }
-    }
-
-    @Override
-    public void run() {
-        if (Env.isCheckpointThread()) {
-            return;
-        }
-        cancelExpiredTask();
     }
 
     private void cancelExpiredTask() {
@@ -91,9 +89,9 @@ public class AnalysisTaskExecutor extends Thread {
         }
     }
 
-    public void submitTask(BaseAnalysisTask task) {
+    public Future<?> submitTask(BaseAnalysisTask task) {
         AnalysisTaskWrapper taskWrapper = new AnalysisTaskWrapper(this, task);
-        executors.submit(taskWrapper);
+        return executors.submit(taskWrapper);
     }
 
     public void putJob(AnalysisTaskWrapper wrapper) throws Exception {
@@ -107,5 +105,10 @@ public class AnalysisTaskExecutor extends Thread {
     public void clear() {
         executors.getQueue().clear();
         taskQueue.clear();
+    }
+
+    // For unit test only.
+    public BlockingQueue<AnalysisTaskWrapper> getTaskQueue() {
+        return taskQueue;
     }
 }

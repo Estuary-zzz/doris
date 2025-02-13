@@ -24,7 +24,7 @@ suite("test_primary_key_partial_update_seq_type", "p0") {
     for (def use_row_store : [false, true]) {
         logger.info("current params: use_row_store: ${use_row_store}")
 
-        connect(user = context.config.jdbcUser, password = context.config.jdbcPassword, url = context.config.jdbcUrl) {
+        connect( context.config.jdbcUser, context.config.jdbcPassword, context.config.jdbcUrl) {
             sql "use ${db};"
 
             def tableName = "test_primary_key_partial_update_seq_type"
@@ -47,9 +47,11 @@ suite("test_primary_key_partial_update_seq_type", "p0") {
                         "store_row_column" = "${use_row_store}"); """
             // insert 2 lines
             sql """
-                insert into ${tableName} values
-                    (2, "doris2", 2000, 223, 1, '2023-01-01'),
-                    (1, "doris", 1000, 123, 1, '2023-01-01')
+                insert into ${tableName}
+                    (id, name, score, test, dft, update_time, __DORIS_SEQUENCE_COL__)
+                values
+                    (2, "doris2", 2000, 223, 1, '2023-01-01', 1),
+                    (1, "doris", 1000, 123, 1, '2023-01-01', 1)
             """
 
             sql "sync"
@@ -108,7 +110,10 @@ suite("test_primary_key_partial_update_seq_type", "p0") {
             sql "sync"
 
             qt_partial_update_with_seq_score_hidden """
-                select * from ${tableName} order by id;
+                select id, name, score, test, dft, update_time, __DORIS_DELETE_SIGN__, __DORIS_VERSION_COL__,
+                       __DORIS_SEQUENCE_COL__
+                from ${tableName}
+                order by id;
             """
 
             // use test as sequence column
@@ -138,7 +143,10 @@ suite("test_primary_key_partial_update_seq_type", "p0") {
             sql "sync"
 
             qt_partial_update_with_seq_test_hidden """
-                select * from ${tableName} order by id;
+                select id, name, score, test, dft, update_time, __DORIS_DELETE_SIGN__, __DORIS_VERSION_COL__,
+                       __DORIS_SEQUENCE_COL__
+                from ${tableName}
+                order by id;
             """
 
             // no partial update header, stream load should success,
@@ -158,7 +166,10 @@ suite("test_primary_key_partial_update_seq_type", "p0") {
             sql "sync"
 
             qt_select_no_partial_update_score """
-                select * from ${tableName} order by id;
+                select id, name, score, test, dft, update_time, __DORIS_DELETE_SIGN__, __DORIS_VERSION_COL__,
+                       __DORIS_SEQUENCE_COL__
+                from ${tableName}
+                order by id;
             """
 
             // no partial update header, stream load should success,
@@ -178,7 +189,10 @@ suite("test_primary_key_partial_update_seq_type", "p0") {
             sql "sync"
 
             qt_select_no_partial_update_test """
-                select * from ${tableName} order by id;
+                select id, name, score, test, dft, update_time, __DORIS_DELETE_SIGN__, __DORIS_VERSION_COL__,
+                       __DORIS_SEQUENCE_COL__
+                from ${tableName}
+                order by id;
             """
 
             // drop table

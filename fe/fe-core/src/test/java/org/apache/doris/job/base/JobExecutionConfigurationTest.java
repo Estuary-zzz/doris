@@ -17,14 +17,19 @@
 
 package org.apache.doris.job.base;
 
+import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.job.common.IntervalUnit;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
 public class JobExecutionConfigurationTest {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JobExecutionConfigurationTest.class);
 
     @Test
     public void testGetTriggerDelayTimesOneTime() {
@@ -32,11 +37,11 @@ public class JobExecutionConfigurationTest {
         configuration.setExecuteType(JobExecuteType.ONE_TIME);
 
         TimerDefinition timerDefinition = new TimerDefinition();
-        timerDefinition.setStartTimeMs(System.currentTimeMillis() + 1000); // Start time set to 1 second in the future
+        timerDefinition.setStartTimeMs(1000L); // Start time set to 1 second in the future
         configuration.setTimerDefinition(timerDefinition);
 
         List<Long> delayTimes = configuration.getTriggerDelayTimes(
-                System.currentTimeMillis(), System.currentTimeMillis(), System.currentTimeMillis() + 5000);
+                0L, 0L, 5000L);
 
         Assertions.assertEquals(1, delayTimes.size());
         Assertions.assertEquals(1, delayTimes.get(0).longValue());
@@ -48,23 +53,100 @@ public class JobExecutionConfigurationTest {
         configuration.setExecuteType(JobExecuteType.RECURRING);
 
         TimerDefinition timerDefinition = new TimerDefinition();
-        timerDefinition.setStartTimeMs(1000L); // Start time set to 1 second in the future
+        timerDefinition.setStartTimeMs(100000L); // Start time set to 1 second in the future
         timerDefinition.setInterval(10L); // Interval set to 10 milliseconds
-        timerDefinition.setIntervalUnit(IntervalUnit.SECOND);
+        timerDefinition.setIntervalUnit(IntervalUnit.MINUTE);
         configuration.setTimerDefinition(timerDefinition);
 
         List<Long> delayTimes = configuration.getTriggerDelayTimes(
-                0L, 0L, 11000L);
+                0L, 0L, 1100000L);
 
         Assertions.assertEquals(2, delayTimes.size());
-        Assertions.assertArrayEquals(new Long[]{1L, 11L}, delayTimes.toArray());
+        Assertions.assertArrayEquals(new Long[]{100L, 700L}, delayTimes.toArray());
         delayTimes = configuration.getTriggerDelayTimes(
-                   2000L, 0L, 11000L);
+                200000L, 0L, 1100000L);
+        Assertions.assertEquals(2, delayTimes.size());
+        Assertions.assertArrayEquals(new Long[]{0L, 500L}, delayTimes.toArray());
+        delayTimes = configuration.getTriggerDelayTimes(
+                1001000L, 0L, 1000000L);
         Assertions.assertEquals(1, delayTimes.size());
-        Assertions.assertArrayEquals(new Long[]{ 9L}, delayTimes.toArray());
-        delayTimes = configuration.getTriggerDelayTimes(
-                1001L, 0L, 10000L);
-        Assertions.assertEquals(0, delayTimes.size());
+        timerDefinition.setStartTimeMs(2000L);
+        timerDefinition.setIntervalUnit(IntervalUnit.SECOND);
+        Assertions.assertArrayEquals(new Long[]{2L, 12L}, configuration.getTriggerDelayTimes(100000L, 100000L, 120000L).toArray());
+
+        timerDefinition.setIntervalUnit(IntervalUnit.SECOND);
+        long second = 1000L;
+        timerDefinition.setStartTimeMs(second);
+        timerDefinition.setInterval(1L);
+        Assertions.assertEquals(2, configuration.getTriggerDelayTimes(second * 5 + 10L, second * 3, second * 7).size());
+        Assertions.assertEquals(2, configuration.getTriggerDelayTimes(second * 5, second * 5, second * 7).size());
+        timerDefinition.setStartTimeMs(1672531200000L);
+        timerDefinition.setIntervalUnit(IntervalUnit.MINUTE);
+        timerDefinition.setInterval(1L);
+
+        List<Long> expectDelayTimes = configuration.getTriggerDelayTimes(1672531200000L, 1672531200000L, 1672531850000L);
+
+        Assertions.assertArrayEquals(new Long[]{0L, 60L, 120L, 180L, 240L, 300L, 360L, 420L, 480L, 540L, 600L}, expectDelayTimes.toArray());
+        timerDefinition.setIntervalUnit(IntervalUnit.MINUTE);
+        timerDefinition.setInterval(1L);
+        timerDefinition.setStartTimeMs(1577808000000L);
+        // Log detailed time information
+        LOG.info("Current time is: "
+                + TimeUtils.longToTimeStringWithms(1736459699000L));
+        LOG.info("Start time window is: "
+                + TimeUtils.longToTimeStringWithms(1736459698000L));
+        LOG.info("Latest batch scheduler timer task time is: "
+                + TimeUtils.longToTimeStringWithms(1736460299000L));
+
+        // Get and log trigger delay times
+        delayTimes = configuration.getTriggerDelayTimes(1736459699000L, 1736459698000L,
+                1736460299000L);
+        Assertions.assertEquals(10, delayTimes.size());
+        LOG.info("Trigger delay times size: " + delayTimes.size());
+        delayTimes.forEach(a -> LOG.info(TimeUtils.longToTimeStringWithms(a * 1000 + 1736459699000L)));
+
+        LOG.info("----");
+
+        // Log detailed time information
+        LOG.info("Current time is: "
+                + TimeUtils.longToTimeStringWithms(1736460901000L));
+        LOG.info("Start time window is: "
+                + TimeUtils.longToTimeStringWithms(1736460900000L));
+        LOG.info("Latest batch scheduler timer task time is: "
+                + TimeUtils.longToTimeStringWithms(1736461501000L));
+
+        // Get and log trigger delay times
+        delayTimes = configuration.getTriggerDelayTimes(1736460901000L, 1736460900000L,
+                1736461501000L);
+        Assertions.assertEquals(11, delayTimes.size());
+        LOG.info("Trigger delay times size: " + delayTimes.size());
+        delayTimes.forEach(a -> LOG.info(TimeUtils.longToTimeStringWithms(a * 1000 + 1736460901000L)));
+
+        LOG.info("----");
+
+        // Log detailed time information
+        LOG.info("Current time is: " + TimeUtils.longToTimeStringWithms(1736461502000L));
+        LOG.info("Start time window is: " + TimeUtils.longToTimeStringWithms(1736461501000L));
+        LOG.info("Latest batch scheduler timer task time is: "
+                + TimeUtils.longToTimeStringWithms(1736462102000L));
+
+        // Get and log trigger delay times
+        delayTimes = configuration.getTriggerDelayTimes(1736461502000L, 1736461501000L,
+                1736462102000L);
+        Assertions.assertEquals(10, delayTimes.size());
+        LOG.info("Trigger delay times size: " + delayTimes.size());
+        delayTimes.forEach(a -> LOG.info(TimeUtils.longToTimeStringWithms(a * 1000 + 1736461502000L)));
+    }
+
+    @Test
+    public void testImmediate() {
+        JobExecutionConfiguration configuration = new JobExecutionConfiguration();
+        configuration.setExecuteType(JobExecuteType.ONE_TIME);
+        configuration.setImmediate(true);
+        TimerDefinition timerDefinition = new TimerDefinition();
+        timerDefinition.setStartTimeMs(0L);
+        configuration.setTimerDefinition(timerDefinition);
+        configuration.checkParams();
     }
 
 }

@@ -18,9 +18,11 @@
 package org.apache.doris.load;
 
 import org.apache.doris.analysis.DeleteStmt;
+import org.apache.doris.analysis.Predicate;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Partition;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
@@ -28,11 +30,13 @@ import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.common.util.ListComparator;
 import org.apache.doris.common.util.TimeUtils;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.QueryState;
 import org.apache.doris.transaction.TransactionState;
+import org.apache.doris.transaction.TransactionStatus;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
@@ -50,6 +54,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.UUID;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class DeleteHandler implements Writable {
@@ -86,6 +91,67 @@ public class DeleteHandler implements Writable {
         lock.writeLock().unlock();
     }
 
+    /**
+     * use for Nereids process empty relation
+     */
+    public void processEmptyRelation(QueryState execState) {
+        String sb = "{'label':'" + DeleteJob.DELETE_PREFIX + UUID.randomUUID()
+                + "', 'txnId':'" + -1
+                + "', 'status':'" + TransactionStatus.VISIBLE.name() + "'}";
+        execState.setOk(0, 0, sb);
+    }
+
+    /**
+     * used for Nereids planner
+     */
+    public void process(Database targetDb, OlapTable targetTbl, List<Partition> selectedPartitions,
+            List<Predicate> deleteConditions, QueryState execState, List<String> partitionNames) {
+        DeleteJob deleteJob = null;
+        try {
+            targetTbl.readLock();
+            try {
+                if (targetTbl.getState() != OlapTable.OlapTableState.NORMAL) {
+                    // table under alter operation can also do delete.
+                    // just add a comment here to notice.
+                }
+                deleteJob = DeleteJob.newBuilder()
+                        .buildWithNereids(new DeleteJob.BuildParams(
+                                targetDb,
+                                targetTbl,
+                                partitionNames,
+                                selectedPartitions,
+                                deleteConditions));
+
+                long txnId = deleteJob.beginTxn();
+                TransactionState txnState = Env.getCurrentGlobalTransactionMgr()
+                        .getTransactionState(targetDb.getId(), txnId);
+                // must call this to make sure we only handle the tablet in the mIndex we saw here.
+                // table may be under schema change or rollup, and the newly created tablets will not be checked later,
+                // to make sure that the delete transaction can be done successfully.
+                deleteJob.addTableIndexes(txnState);
+                idToDeleteJob.put(txnId, deleteJob);
+                deleteJob.dispatch();
+            } finally {
+                targetTbl.readUnlock();
+            }
+            deleteJob.await();
+            String commitMsg = deleteJob.commit();
+            execState.setOk(0, 0, commitMsg);
+        } catch (Exception ex) {
+            if (deleteJob != null) {
+                deleteJob.cancel(ex.getMessage());
+            }
+            execState.setError(ex.getMessage());
+        } finally {
+            if (!FeConstants.runningUnitTest) {
+                clearJob(deleteJob);
+            }
+        }
+    }
+
+    /**
+     * used for legacy planner
+     */
     public void process(DeleteStmt stmt, QueryState execState) throws DdlException {
         Database targetDb = Env.getCurrentInternalCatalog().getDbOrDdlException(stmt.getDbName());
         OlapTable targetTbl = targetDb.getOlapTableOrDdlException(stmt.getTableName());
@@ -181,6 +247,7 @@ public class DeleteHandler implements Writable {
         if (dbId == -1) {
             for (Long tempDbId : dbToDeleteInfos.keySet()) {
                 if (!Env.getCurrentEnv().getAccessManager().checkDbPriv(ConnectContext.get(),
+                        InternalCatalog.INTERNAL_CATALOG_NAME,
                         Env.getCurrentEnv().getCatalogMgr().getDbNullable(tempDbId).getFullName(),
                         PrivPredicate.LOAD)) {
                     continue;
@@ -199,9 +266,10 @@ public class DeleteHandler implements Writable {
             }
 
             for (DeleteInfo deleteInfo : deleteInfoList) {
-                if (!Env.getCurrentEnv().getAccessManager().checkTblPriv(ConnectContext.get(), dbName,
-                        deleteInfo.getTableName(),
-                        PrivPredicate.LOAD)) {
+                if (!Env.getCurrentEnv().getAccessManager()
+                        .checkTblPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME, dbName,
+                                deleteInfo.getTableName(),
+                                PrivPredicate.LOAD)) {
                     continue;
                 }
 
@@ -283,6 +351,8 @@ public class DeleteHandler implements Writable {
                 iter1.remove();
             }
         }
-        LOG.debug("remove expired delete job info num: {}", counter);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("remove expired delete job info num: {}", counter);
+        }
     }
 }

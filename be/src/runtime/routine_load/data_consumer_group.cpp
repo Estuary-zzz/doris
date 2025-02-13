@@ -125,10 +125,9 @@ Status KafkaDataConsumerGroup::start_all(std::shared_ptr<StreamLoadContext> ctx,
     bool eos = false;
     while (true) {
         if (eos || left_time <= 0 || left_rows <= 0 || left_bytes <= 0) {
-            _rows = ctx->max_batch_rows - left_rows;
             LOG(INFO) << "consumer group done: " << _grp_id
                       << ". consume time(ms)=" << ctx->max_interval_s * 1000 - left_time
-                      << ", received rows=" << _rows
+                      << ", received rows=" << ctx->max_batch_rows - left_rows
                       << ", received bytes=" << ctx->max_batch_size - left_bytes << ", eos: " << eos
                       << ", left_time: " << left_time << ", left_rows: " << left_rows
                       << ", left_bytes: " << left_bytes
@@ -159,30 +158,37 @@ Status KafkaDataConsumerGroup::start_all(std::shared_ptr<StreamLoadContext> ctx,
         RdKafka::Message* msg;
         bool res = _queue.blocking_get(&msg);
         if (res) {
+            // conf has to be deleted finally
+            Defer delete_msg {[msg]() { delete msg; }};
             VLOG_NOTICE << "get kafka message"
                         << ", partition: " << msg->partition() << ", offset: " << msg->offset()
                         << ", len: " << msg->len();
 
-            Status st = (kafka_pipe.get()->*append_data)(static_cast<const char*>(msg->payload()),
-                                                         static_cast<size_t>(msg->len()));
-            if (st.ok()) {
-                left_rows--;
-                left_bytes -= msg->len();
-                cmt_offset[msg->partition()] = msg->offset();
-                VLOG_NOTICE << "consume partition[" << msg->partition() << " - " << msg->offset()
-                            << "]";
+            if (msg->err() == RdKafka::ERR__PARTITION_EOF) {
+                if (msg->offset() > 0) {
+                    cmt_offset[msg->partition()] = msg->offset() - 1;
+                }
             } else {
-                // failed to append this msg, we must stop
-                LOG(WARNING) << "failed to append msg to pipe. grp: " << _grp_id;
-                eos = true;
-                {
-                    std::unique_lock<std::mutex> lock(_mutex);
-                    if (result_st.ok()) {
-                        result_st = st;
+                Status st = (kafka_pipe.get()->*append_data)(
+                        static_cast<const char*>(msg->payload()), static_cast<size_t>(msg->len()));
+                if (st.ok()) {
+                    left_rows--;
+                    left_bytes -= msg->len();
+                    cmt_offset[msg->partition()] = msg->offset();
+                    VLOG_NOTICE << "consume partition[" << msg->partition() << " - "
+                                << msg->offset() << "]";
+                } else {
+                    // failed to append this msg, we must stop
+                    LOG(WARNING) << "failed to append msg to pipe. grp: " << _grp_id;
+                    eos = true;
+                    {
+                        std::unique_lock<std::mutex> lock(_mutex);
+                        if (result_st.ok()) {
+                            result_st = st;
+                        }
                     }
                 }
             }
-            delete msg;
         } else {
             // queue is empty and shutdown
             eos = true;

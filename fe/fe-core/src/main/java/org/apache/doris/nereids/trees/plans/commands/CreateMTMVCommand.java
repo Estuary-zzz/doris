@@ -17,7 +17,8 @@
 
 package org.apache.doris.nereids.trees.plans.commands;
 
-import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.analysis.StmtType;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.nereids.trees.plans.PlanType;
 import org.apache.doris.nereids.trees.plans.commands.info.CreateMTMVInfo;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
@@ -48,12 +49,17 @@ public class CreateMTMVCommand extends Command implements ForwardWithSync {
     @Override
     public void run(ConnectContext ctx, StmtExecutor executor) throws Exception {
         createMTMVInfo.analyze(ctx);
-        throw new AnalysisException("current not support.");
+        Env.getCurrentEnv().createTable(createMTMVInfo.translateToLegacyStmt());
     }
 
     @Override
     public <R, C> R accept(PlanVisitor<R, C> visitor, C context) {
         return visitor.visitCreateMTMVCommand(this, context);
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CREATE;
     }
 
 }

@@ -30,8 +30,8 @@ suite("test_pg_jdbc_catalog", "p0,external,pg,external_docker,external_docker_pg
         String inDorisTable = "test_pg_jdbc_doris_in_tb";
         String test_insert = "test_insert";
         String test_all_types = "test_all_types";
-        String test_insert_all_types = "test_insert_all_types";
-        String test_ctas = "test_ctas";
+        String test_insert_all_types = "test_pg_insert_all_types";
+        String test_ctas = "test_pg_ctas";
 
         sql """create database if not exists ${internal_db_name}; """
 
@@ -45,6 +45,7 @@ suite("test_pg_jdbc_catalog", "p0,external,pg,external_docker,external_docker_pg
             "driver_url" = "${driver_url}",
             "driver_class" = "org.postgresql.Driver"
         );"""
+        order_qt_show_db """ show databases from ${catalog_name}; """
         sql """use ${internal_db_name}"""
         sql  """ drop table if exists ${internal_db_name}.${inDorisTable} """
         sql  """
@@ -105,6 +106,7 @@ suite("test_pg_jdbc_catalog", "p0,external,pg,external_docker,external_docker_pg
         order_qt_test9  """ select * from test7 order by id; """
         order_qt_test10  """ select * from test8 order by id; """
         order_qt_test11  """ select * from test9 order by id1; """
+        order_qt_filter4  """ select * from test3 where name not like '%abc%' order by id; """
 
         sql """ use ${ex_schema_name2}"""
         order_qt_test12  """ select * from test10 order by id; """
@@ -127,6 +129,7 @@ suite("test_pg_jdbc_catalog", "p0,external,pg,external_docker,external_docker_pg
         order_qt_partition_2_2 "select * from tb_test_alarm_2020_10;"
         order_qt_partition_2_3 "select * from tb_test_alarm_2020_11;"
         order_qt_partition_2_4 "select * from tb_test_alarm_2020_12;"
+        order_qt_num_zero "select * from num_zero;"
 
         // test insert
         String uuid1 = UUID.randomUUID().toString();
@@ -142,6 +145,13 @@ suite("test_pg_jdbc_catalog", "p0,external,pg,external_docker,external_docker_pg
 
         // test select all types
         order_qt_select_all_types """select * from ${test_all_types}; """
+
+        order_qt_select_all_types_tvf """ select * from query('catalog' = '${catalog_name}', 'query' = 'select * from catalog_pg_test.${test_all_types};') order by 1"""
+
+        // test select all array types
+        order_qt_select_all_arr_types """select *  from test_all_support_types_array order by 1;"""
+
+        order_qt_select_all_arr2d_types """select *  from test_all_support_types_array_2d order by 1;"""
 
         // test test ctas
         sql """ drop table if exists internal.${internal_db_name}.${test_ctas} """

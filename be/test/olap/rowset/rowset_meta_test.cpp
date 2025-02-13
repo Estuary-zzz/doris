@@ -21,6 +21,7 @@
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest-message.h>
 #include <gtest/gtest-test-part.h>
+#include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
@@ -72,7 +73,7 @@ private:
     std::string _json_rowset_meta;
 };
 
-void do_check(RowsetMeta rowset_meta) {
+void do_check(const RowsetMeta& rowset_meta) {
     RowsetId rowset_id;
     rowset_id.init(540081);
     EXPECT_EQ(rowset_id, rowset_meta.rowset_id());
@@ -111,6 +112,15 @@ TEST_F(RowsetMetaTest, TestInitWithInvalidData) {
     RowsetMeta rowset_meta;
     EXPECT_FALSE(rowset_meta.init_from_json("invalid json meta data"));
     EXPECT_FALSE(rowset_meta.init("invalid pb meta data"));
+}
+
+TEST_F(RowsetMetaTest, TestRowsetIdInit) {
+    RowsetId id {};
+    config::force_regenerate_rowsetid_on_start_error = true;
+    std::string_view rowset_id_str = "test";
+    id.init(rowset_id_str);
+    // 0x100000000000000 - 0x01
+    EXPECT_EQ(id.to_string(), "72057594037927935");
 }
 
 } // namespace doris

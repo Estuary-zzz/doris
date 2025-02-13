@@ -66,8 +66,6 @@ public:
 
     size_t get_number_of_arguments() const override { return 1; }
 
-    bool use_default_implementation_for_nulls() const override { return true; }
-
     DataTypePtr get_return_type_impl(const DataTypes& arguments) const override {
         DCHECK(is_array(arguments[0]))
                 << "argument for function: " << name << " should be DataTypeArray but it has type "
@@ -96,14 +94,15 @@ public:
             return std::make_shared<DataTypeArray>(is_nullable ? make_nullable(return_type)
                                                                : return_type);
         } else {
-            LOG(FATAL) << "Function of " << name
-                       << " return type get wrong: and input argument is: "
-                       << arguments[0]->get_name();
+            throw doris::Exception(
+                    ErrorCode::INVALID_ARGUMENT,
+                    "Function of {}, return type get wrong: and input argument is: {}", name,
+                    arguments[0]->get_name());
         }
     }
 
     Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                        size_t result, size_t input_rows_count) const override {
+                        uint32_t result, size_t input_rows_count) const override {
         const ColumnWithTypeAndName& arg = block.get_by_position(arguments[0]);
         auto res_column = _execute_non_nullable(arg, input_rows_count);
         if (!res_column) {
@@ -227,12 +226,12 @@ private:
         } else if (which_type.is_decimal64()) {
             res = _execute_number_expanded<Decimal64, Decimal64>(offsets, *nested_column,
                                                                  nested_null_map);
-        } else if (which_type.is_decimal128i()) {
-            res = _execute_number_expanded<Decimal128I, Decimal128I>(offsets, *nested_column,
-                                                                     nested_null_map);
-        } else if (which_type.is_decimal128()) {
-            res = _execute_number_expanded<Decimal128, Decimal128>(offsets, *nested_column,
-                                                                   nested_null_map);
+        } else if (which_type.is_decimal128v3()) {
+            res = _execute_number_expanded<Decimal128V3, Decimal128V3>(offsets, *nested_column,
+                                                                       nested_null_map);
+        } else if (which_type.is_decimal128v2()) {
+            res = _execute_number_expanded<Decimal128V2, Decimal128V2>(offsets, *nested_column,
+                                                                       nested_null_map);
         } else if (which_type.is_decimal256()) {
             res = _execute_number_expanded<Decimal256, Decimal256>(offsets, *nested_column,
                                                                    nested_null_map);

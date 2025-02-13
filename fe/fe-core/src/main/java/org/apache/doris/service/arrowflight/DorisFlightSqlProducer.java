@@ -25,10 +25,13 @@ import org.apache.doris.common.util.Util;
 import org.apache.doris.mysql.MysqlCommand;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.QueryState.MysqlStateType;
+import org.apache.doris.service.arrowflight.results.FlightSqlEndpointsLocation;
 import org.apache.doris.service.arrowflight.results.FlightSqlResultCacheEntry;
 import org.apache.doris.service.arrowflight.sessions.FlightSessionsManager;
+import org.apache.doris.thrift.TUniqueId;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
@@ -47,6 +50,7 @@ import org.apache.arrow.flight.sql.FlightSqlProducer;
 import org.apache.arrow.flight.sql.SqlInfoBuilder;
 import org.apache.arrow.flight.sql.impl.FlightSql.ActionClosePreparedStatementRequest;
 import org.apache.arrow.flight.sql.impl.FlightSql.ActionCreatePreparedStatementRequest;
+import org.apache.arrow.flight.sql.impl.FlightSql.ActionCreatePreparedStatementResult;
 import org.apache.arrow.flight.sql.impl.FlightSql.CommandGetCatalogs;
 import org.apache.arrow.flight.sql.impl.FlightSql.CommandGetCrossReference;
 import org.apache.arrow.flight.sql.impl.FlightSql.CommandGetDbSchemas;
@@ -61,181 +65,248 @@ import org.apache.arrow.flight.sql.impl.FlightSql.CommandPreparedStatementQuery;
 import org.apache.arrow.flight.sql.impl.FlightSql.CommandPreparedStatementUpdate;
 import org.apache.arrow.flight.sql.impl.FlightSql.CommandStatementQuery;
 import org.apache.arrow.flight.sql.impl.FlightSql.CommandStatementUpdate;
+import org.apache.arrow.flight.sql.impl.FlightSql.DoPutUpdateResult;
 import org.apache.arrow.flight.sql.impl.FlightSql.SqlSupportedCaseSensitivity;
 import org.apache.arrow.flight.sql.impl.FlightSql.TicketStatementQuery;
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.util.AutoCloseables;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.WriteChannel;
+import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
+/**
+ * Implementation of Arrow Flight SQL service
+ * <p>
+ * All methods must catch all possible Exceptions, print and throw CallStatus,
+ * otherwise error message will be discarded.
+ */
 public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable {
     private static final Logger LOG = LogManager.getLogger(DorisFlightSqlProducer.class);
     private final Location location;
     private final BufferAllocator rootAllocator = new RootAllocator();
     private final SqlInfoBuilder sqlInfoBuilder;
     private final FlightSessionsManager flightSessionsManager;
+    private final ExecutorService executorService = Executors.newFixedThreadPool(100);
 
     public DorisFlightSqlProducer(final Location location, FlightSessionsManager flightSessionsManager) {
         this.location = location;
         this.flightSessionsManager = flightSessionsManager;
         sqlInfoBuilder = new SqlInfoBuilder();
-        sqlInfoBuilder.withFlightSqlServerName("DorisFE")
-                .withFlightSqlServerVersion("1.0")
-                .withFlightSqlServerArrowVersion("13.0")
-                .withFlightSqlServerReadOnly(false)
-                .withSqlIdentifierQuoteChar("`")
-                .withSqlDdlCatalog(true)
-                .withSqlDdlSchema(false)
-                .withSqlDdlTable(false)
+        sqlInfoBuilder.withFlightSqlServerName("DorisFE").withFlightSqlServerVersion("1.0")
+                .withFlightSqlServerArrowVersion("13.0").withFlightSqlServerReadOnly(false)
+                .withSqlIdentifierQuoteChar("`").withSqlDdlCatalog(true).withSqlDdlSchema(false).withSqlDdlTable(false)
                 .withSqlIdentifierCase(SqlSupportedCaseSensitivity.SQL_CASE_SENSITIVITY_CASE_INSENSITIVE)
                 .withSqlQuotedIdentifierCase(SqlSupportedCaseSensitivity.SQL_CASE_SENSITIVITY_CASE_INSENSITIVE);
     }
 
-    @Override
-    public void getStreamPreparedStatement(final CommandPreparedStatementQuery command, final CallContext context,
-            final ServerStreamListener listener) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("getStreamPreparedStatement unimplemented").toRuntimeException();
-    }
-
-    @Override
-    public void closePreparedStatement(final ActionClosePreparedStatementRequest request, final CallContext context,
-            final StreamListener<Result> listener) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("closePreparedStatement unimplemented").toRuntimeException();
-    }
-
-    @Override
-    public FlightInfo getFlightInfoStatement(final CommandStatementQuery request, final CallContext context,
-            final FlightDescriptor descriptor) {
-        ConnectContext connectContext = null;
+    private static ByteBuffer serializeMetadata(final Schema schema) {
+        final ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         try {
-            connectContext = flightSessionsManager.getConnectContext(context.peerIdentity());
-            // After the previous query was executed, there was no getStreamStatement to take away the result.
-            connectContext.getFlightSqlChannel().reset();
-            final String query = request.getQuery();
-            final FlightSqlConnectProcessor flightSQLConnectProcessor = new FlightSqlConnectProcessor(connectContext);
+            MessageSerializer.serialize(new WriteChannel(Channels.newChannel(outputStream)), schema);
 
-            flightSQLConnectProcessor.handleQuery(query);
-            if (connectContext.getState().getStateType() == MysqlStateType.ERR) {
-                throw new RuntimeException("after handleQuery");
-            }
-
-            if (connectContext.isReturnResultFromLocal()) {
-                // set/use etc. stmt returns an OK result by default.
-                if (connectContext.getFlightSqlChannel().resultNum() == 0) {
-                    // a random query id and add empty results
-                    String queryId = UUID.randomUUID().toString();
-                    connectContext.getFlightSqlChannel().addEmptyResult(queryId, query);
-
-                    final ByteString handle = ByteString.copyFromUtf8(context.peerIdentity() + ":" + queryId);
-                    TicketStatementQuery ticketStatement = TicketStatementQuery.newBuilder().setStatementHandle(handle)
-                            .build();
-                    return getFlightInfoForSchema(ticketStatement, descriptor,
-                            connectContext.getFlightSqlChannel().getResult(queryId).getVectorSchemaRoot().getSchema());
-                }
-
-                // A Flight Sql request can only contain one statement that returns result,
-                // otherwise expected thrown exception during execution.
-                Preconditions.checkState(connectContext.getFlightSqlChannel().resultNum() == 1);
-
-                // The tokens used for authentication between getStreamStatement and getFlightInfoStatement
-                // are different. So put the peerIdentity into the ticket and then getStreamStatement is used to find
-                // the correct ConnectContext.
-                // queryId is used to find query results.
-                final ByteString handle = ByteString.copyFromUtf8(
-                        context.peerIdentity() + ":" + DebugUtil.printId(connectContext.queryId()));
-                TicketStatementQuery ticketStatement = TicketStatementQuery.newBuilder().setStatementHandle(handle)
-                        .build();
-                return getFlightInfoForSchema(ticketStatement, descriptor,
-                        connectContext.getFlightSqlChannel().getResult(DebugUtil.printId(connectContext.queryId()))
-                                .getVectorSchemaRoot().getSchema());
-            } else {
-                // Now only query stmt will pull results from BE.
-                final ByteString handle = ByteString.copyFromUtf8(
-                        DebugUtil.printId(connectContext.getFinstId()) + ":" + query);
-                Schema schema = flightSQLConnectProcessor.fetchArrowFlightSchema(5000);
-                if (schema == null) {
-                    throw CallStatus.INTERNAL.withDescription("fetch arrow flight schema is null").toRuntimeException();
-                }
-                TicketStatementQuery ticketStatement = TicketStatementQuery.newBuilder().setStatementHandle(handle)
-                        .build();
-                Ticket ticket = new Ticket(Any.pack(ticketStatement).toByteArray());
-                // TODO Support multiple endpoints.
-                Location location = Location.forGrpcInsecure(connectContext.getResultFlightServerAddr().hostname,
-                        connectContext.getResultFlightServerAddr().port);
-                List<FlightEndpoint> endpoints = Collections.singletonList(new FlightEndpoint(ticket, location));
-                // TODO Set in BE callback after query end, Client will not callback.
-                connectContext.setCommand(MysqlCommand.COM_SLEEP);
-                return new FlightInfo(schema, descriptor, endpoints, -1, -1);
-            }
-        } catch (Exception e) {
-            if (null != connectContext) {
-                connectContext.setCommand(MysqlCommand.COM_SLEEP);
-                String errMsg = "get flight info statement failed, " + e.getMessage() + ", " + Util.getRootCauseMessage(
-                        e) + ", error code: " + connectContext.getState().getErrorCode() + ", error msg: "
-                        + connectContext.getState().getErrorMessage();
-                LOG.warn(errMsg, e);
-                throw CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException();
-            }
-            LOG.warn("get flight info statement failed, " + e.getMessage(), e);
-            throw CallStatus.INTERNAL.withDescription(Util.getRootCauseMessage(e)).withCause(e).toRuntimeException();
+            return ByteBuffer.wrap(outputStream.toByteArray());
+        } catch (final IOException e) {
+            throw new RuntimeException("Failed to serialize arrow flight sql schema", e);
         }
     }
 
-    @Override
-    public FlightInfo getFlightInfoPreparedStatement(final CommandPreparedStatementQuery command,
-            final CallContext context, final FlightDescriptor descriptor) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("getFlightInfoPreparedStatement unimplemented")
-                .toRuntimeException();
-    }
-
-    @Override
-    public SchemaResult getSchemaStatement(final CommandStatementQuery command, final CallContext context,
-            final FlightDescriptor descriptor) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("getSchemaStatement unimplemented").toRuntimeException();
-    }
-
-    @Override
-    public void getStreamStatement(final TicketStatementQuery ticketStatementQuery, final CallContext context,
-            final ServerStreamListener listener) {
-        ConnectContext connectContext = null;
-        final String handle = ticketStatementQuery.getStatementHandle().toStringUtf8();
+    private void getStreamStatementResult(String handle, ServerStreamListener listener) {
         String[] handleParts = handle.split(":");
         String executedPeerIdentity = handleParts[0];
         String queryId = handleParts[1];
+        // The tokens used for authentication between getStreamStatement and getFlightInfoStatement are different.
+        ConnectContext connectContext = flightSessionsManager.getConnectContext(executedPeerIdentity);
         try {
-            // The tokens used for authentication between getStreamStatement and getFlightInfoStatement are different.
-            connectContext = flightSessionsManager.getConnectContext(executedPeerIdentity);
             final FlightSqlResultCacheEntry flightSqlResultCacheEntry = Objects.requireNonNull(
                     connectContext.getFlightSqlChannel().getResult(queryId));
             final VectorSchemaRoot vectorSchemaRoot = flightSqlResultCacheEntry.getVectorSchemaRoot();
             listener.start(vectorSchemaRoot);
             listener.putNext();
         } catch (Exception e) {
-            listener.error(e);
-            if (null != connectContext) {
-                String errMsg = "get stream statement failed, " + e.getMessage() + ", " + Util.getRootCauseMessage(e)
-                        + ", error code: " + connectContext.getState().getErrorCode() + ", error msg: "
-                        + connectContext.getState().getErrorMessage();
-                LOG.warn(errMsg, e);
-                throw CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException();
-            }
-            LOG.warn("get stream statement failed, " + e.getMessage(), e);
-            throw CallStatus.INTERNAL.withDescription(Util.getRootCauseMessage(e)).withCause(e).toRuntimeException();
+            String errMsg = "get stream statement failed, " + e.getMessage() + ", " + Util.getRootCauseMessage(e)
+                    + ", error code: " + connectContext.getState().getErrorCode() + ", error msg: "
+                    + connectContext.getState().getErrorMessage();
+            handleStreamException(e, errMsg, listener);
         } finally {
             listener.completed();
-            if (null != connectContext) {
-                // The result has been sent, delete it.
-                connectContext.getFlightSqlChannel().invalidate(queryId);
-            }
+            // The result has been sent or sent failed, delete it.
+            connectContext.getFlightSqlChannel().invalidate(queryId);
         }
+    }
+
+    @Override
+    public void getStreamPreparedStatement(final CommandPreparedStatementQuery command, final CallContext context,
+            final ServerStreamListener listener) {
+        getStreamStatementResult(command.getPreparedStatementHandle().toStringUtf8(), listener);
+    }
+
+    @Override
+    public void getStreamStatement(final TicketStatementQuery ticketStatementQuery, final CallContext context,
+            final ServerStreamListener listener) {
+        getStreamStatementResult(ticketStatementQuery.getStatementHandle().toStringUtf8(), listener);
+    }
+
+    @Override
+    public void closePreparedStatement(final ActionClosePreparedStatementRequest request, final CallContext context,
+            final StreamListener<Result> listener) {
+        executorService.submit(() -> {
+            try {
+                String[] handleParts = request.getPreparedStatementHandle().toStringUtf8().split(":");
+                String executedPeerIdentity = handleParts[0];
+                String preparedStatementId = handleParts[1];
+                flightSessionsManager.getConnectContext(executedPeerIdentity).removePreparedQuery(preparedStatementId);
+            } catch (final Exception e) {
+                listener.onError(e);
+                return;
+            }
+            listener.onCompleted();
+        });
+    }
+
+    private FlightInfo executeQueryStatement(String peerIdentity, ConnectContext connectContext, String query,
+            final FlightDescriptor descriptor) {
+        try {
+            Preconditions.checkState(null != connectContext);
+            Preconditions.checkState(!query.isEmpty());
+            // After the previous query was executed, there was no getStreamStatement to take away the result.
+            connectContext.getFlightSqlChannel().reset();
+            connectContext.clearFlightSqlEndpointsLocations();
+            try (FlightSqlConnectProcessor flightSQLConnectProcessor = new FlightSqlConnectProcessor(connectContext)) {
+                flightSQLConnectProcessor.handleQuery(query);
+                if (connectContext.getState().getStateType() == MysqlStateType.ERR) {
+                    throw new RuntimeException("after executeQueryStatement handleQuery");
+                }
+
+                if (connectContext.isReturnResultFromLocal()) {
+                    // set/use etc. stmt returns an OK result by default.
+                    if (connectContext.getFlightSqlChannel().resultNum() == 0) {
+                        // a random query id and add empty results
+                        String queryId = UUID.randomUUID().toString();
+                        connectContext.getFlightSqlChannel().addOKResult(queryId, query);
+
+                        final ByteString handle = ByteString.copyFromUtf8(peerIdentity + ":" + queryId);
+                        TicketStatementQuery ticketStatement = TicketStatementQuery.newBuilder()
+                                .setStatementHandle(handle).build();
+                        return getFlightInfoForSchema(ticketStatement, descriptor,
+                                connectContext.getFlightSqlChannel().getResult(queryId).getVectorSchemaRoot()
+                                        .getSchema());
+                    } else {
+                        // A Flight Sql request can only contain one statement that returns result,
+                        // otherwise expected thrown exception during execution.
+                        Preconditions.checkState(connectContext.getFlightSqlChannel().resultNum() == 1);
+
+                        // The tokens used for authentication between getStreamStatement and getFlightInfoStatement
+                        // are different. So put the peerIdentity into the ticket and then getStreamStatement is used to
+                        // find the correct ConnectContext.
+                        // queryId is used to find query results.
+                        final ByteString handle = ByteString.copyFromUtf8(
+                                peerIdentity + ":" + DebugUtil.printId(connectContext.queryId()));
+                        TicketStatementQuery ticketStatement = TicketStatementQuery.newBuilder()
+                                .setStatementHandle(handle).build();
+                        return getFlightInfoForSchema(ticketStatement, descriptor, connectContext.getFlightSqlChannel()
+                                .getResult(DebugUtil.printId(connectContext.queryId())).getVectorSchemaRoot()
+                                .getSchema());
+                    }
+                } else {
+                    // Now only query stmt will pull results from BE.
+                    flightSQLConnectProcessor.fetchArrowFlightSchema(5000);
+                    if (flightSQLConnectProcessor.getArrowSchema() == null) {
+                        throw CallStatus.INTERNAL.withDescription("fetch arrow flight schema is null")
+                                .toRuntimeException();
+                    }
+
+                    List<FlightEndpoint> endpoints = Lists.newArrayList();
+                    for (FlightSqlEndpointsLocation endpointLoc : connectContext.getFlightSqlEndpointsLocations()) {
+                        TUniqueId tid = endpointLoc.getFinstId();
+                        // Ticket contains the IP and Brpc Port of the Doris BE node where the query result is located.
+                        final ByteString handle = ByteString.copyFromUtf8(
+                                DebugUtil.printId(tid) + "&" + endpointLoc.getResultInternalServiceAddr().hostname + "&"
+                                        + endpointLoc.getResultInternalServiceAddr().port + "&" + query);
+                        TicketStatementQuery ticketStatement = TicketStatementQuery.newBuilder()
+                                .setStatementHandle(handle).build();
+                        Ticket ticket = new Ticket(Any.pack(ticketStatement).toByteArray());
+                        Location location;
+                        if (endpointLoc.getResultPublicAccessAddr().isSetHostname()) {
+                            // In a production environment, it is often inconvenient to expose Doris BE nodes
+                            // to the external network.
+                            // However, a reverse proxy (such as nginx) can be added to all Doris BE nodes,
+                            // and the external client will be randomly routed to a Doris BE node when connecting
+                            // to nginx.
+                            // The query results of Arrow Flight SQL will be randomly saved on a Doris BE node.
+                            // If it is different from the Doris BE node randomly routed by nginx,
+                            // data forwarding needs to be done inside the Doris BE node.
+                            if (endpointLoc.getResultPublicAccessAddr().isSetPort()) {
+                                location = Location.forGrpcInsecure(endpointLoc.getResultPublicAccessAddr().hostname,
+                                        endpointLoc.getResultPublicAccessAddr().port);
+                            } else {
+                                location = Location.forGrpcInsecure(endpointLoc.getResultPublicAccessAddr().hostname,
+                                        endpointLoc.getResultFlightServerAddr().port);
+                            }
+                        } else {
+                            location = Location.forGrpcInsecure(endpointLoc.getResultFlightServerAddr().hostname,
+                                    endpointLoc.getResultFlightServerAddr().port);
+                        }
+                        // By default, the query results of all BE nodes will be aggregated to one BE node.
+                        // ADBC Client will only receive one endpoint and pull data from the BE node
+                        // corresponding to this endpoint.
+                        // `set global enable_parallel_result_sink=true;` to allow each BE to return query results
+                        // separately. ADBC Client will receive multiple endpoints and pull data from each endpoint.
+                        endpoints.add(new FlightEndpoint(ticket, location));
+                    }
+                    // TODO Set in BE callback after query end, Client will not callback.
+                    return new FlightInfo(flightSQLConnectProcessor.getArrowSchema(), descriptor, endpoints, -1, -1);
+                }
+            }
+        } catch (Exception e) {
+            String errMsg = "get flight info statement failed, " + e.getMessage() + ", " + Util.getRootCauseMessage(e)
+                    + ", error code: " + connectContext.getState().getErrorCode() + ", error msg: "
+                    + connectContext.getState().getErrorMessage();
+            LOG.error(errMsg, e);
+            throw CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException();
+        } finally {
+            connectContext.setCommand(MysqlCommand.COM_SLEEP);
+        }
+    }
+
+    @Override
+    public FlightInfo getFlightInfoStatement(final CommandStatementQuery request, final CallContext context,
+            final FlightDescriptor descriptor) {
+        ConnectContext connectContext = flightSessionsManager.getConnectContext(context.peerIdentity());
+        return executeQueryStatement(context.peerIdentity(), connectContext, request.getQuery(), descriptor);
+    }
+
+    @Override
+    public FlightInfo getFlightInfoPreparedStatement(final CommandPreparedStatementQuery command,
+            final CallContext context, final FlightDescriptor descriptor) {
+        String[] handleParts = command.getPreparedStatementHandle().toStringUtf8().split(":");
+        String executedPeerIdentity = handleParts[0];
+        String preparedStatementId = handleParts[1];
+        ConnectContext connectContext = flightSessionsManager.getConnectContext(executedPeerIdentity);
+        return executeQueryStatement(executedPeerIdentity, connectContext,
+                connectContext.getPreparedQuery(preparedStatementId), descriptor);
+    }
+
+    @Override
+    public SchemaResult getSchemaStatement(final CommandStatementQuery command, final CallContext context,
+            final FlightDescriptor descriptor) {
+        throw CallStatus.UNIMPLEMENTED.withDescription("getSchemaStatement unimplemented").toRuntimeException();
     }
 
     @Override
@@ -248,10 +319,57 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
         throw CallStatus.UNIMPLEMENTED.withDescription("listFlights unimplemented").toRuntimeException();
     }
 
+    private ActionCreatePreparedStatementResult buildCreatePreparedStatementResult(ByteString handle,
+            Schema parameterSchema, Schema metaData) {
+        Preconditions.checkState(!Objects.isNull(metaData));
+        final ByteString bytes = Objects.isNull(parameterSchema) ? ByteString.EMPTY
+                : ByteString.copyFrom(serializeMetadata(parameterSchema));
+        return ActionCreatePreparedStatementResult.newBuilder()
+                .setDatasetSchema(ByteString.copyFrom(serializeMetadata(metaData))).setParameterSchema(bytes)
+                .setPreparedStatementHandle(handle).build();
+    }
+
     @Override
     public void createPreparedStatement(final ActionCreatePreparedStatementRequest request, final CallContext context,
             final StreamListener<Result> listener) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("createPreparedStatement unimplemented").toRuntimeException();
+        // TODO can only execute complete SQL, not support SQL parameters.
+        // For Python: the Python code will try to create a prepared statement (this is to fit DBAPI, IIRC) and
+        // if the server raises any error except for NotImplemented it will fail. (If it gets NotImplemented,
+        // it will ignore and execute without a prepared statement.) see: https://github.com/apache/arrow/issues/38786
+        executorService.submit(() -> {
+            ConnectContext connectContext = flightSessionsManager.getConnectContext(context.peerIdentity());
+            try {
+                connectContext.setCommand(MysqlCommand.COM_QUERY);
+                final String query = request.getQuery();
+                String preparedStatementId = UUID.randomUUID().toString();
+                final ByteString handle = ByteString.copyFromUtf8(context.peerIdentity() + ":" + preparedStatementId);
+                connectContext.addPreparedQuery(preparedStatementId, query);
+
+                VectorSchemaRoot emptyVectorSchemaRoot = new VectorSchemaRoot(new ArrayList<>(), new ArrayList<>());
+                final Schema parameterSchema = emptyVectorSchemaRoot.getSchema();
+                // TODO FE does not have the ability to convert root fragment output expr into arrow schema.
+                // However, the metaData schema returned by createPreparedStatement is usually not used by the client,
+                // but it cannot be empty, otherwise it will be mistaken by the client as an updata statement.
+                // see: https://github.com/apache/arrow/issues/38911
+                Schema metaData = connectContext.getFlightSqlChannel()
+                        .createOneOneSchemaRoot("ResultMeta", "UNIMPLEMENTED").getSchema();
+                listener.onNext(new Result(
+                        Any.pack(buildCreatePreparedStatementResult(handle, parameterSchema, metaData)).toByteArray()));
+            } catch (Exception e) {
+                String errMsg = "create prepared statement failed, " + e.getMessage() + ", " + Util.getRootCauseMessage(
+                        e) + ", error code: " + connectContext.getState().getErrorCode() + ", error msg: "
+                        + connectContext.getState().getErrorMessage();
+                LOG.error(errMsg, e);
+                listener.onError(CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException());
+                return;
+            } catch (final Throwable t) {
+                listener.onError(CallStatus.INTERNAL.withDescription("Unknown error: " + t).toRuntimeException());
+                return;
+            } finally {
+                connectContext.setCommand(MysqlCommand.COM_SLEEP);
+            }
+            listener.onCompleted();
+        });
     }
 
     @Override
@@ -268,8 +386,29 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
     @Override
     public Runnable acceptPutPreparedStatementUpdate(CommandPreparedStatementUpdate command, CallContext context,
             FlightStream flightStream, StreamListener<PutResult> ackStream) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("acceptPutPreparedStatementUpdate unimplemented")
-                .toRuntimeException();
+        return () -> {
+            try {
+                while (flightStream.next()) {
+                    final VectorSchemaRoot root = flightStream.getRoot();
+                    final int rowCount = root.getRowCount();
+                    // TODO support update
+                    Preconditions.checkState(rowCount == 0);
+
+                    final int recordCount = -1;
+                    final DoPutUpdateResult build = DoPutUpdateResult.newBuilder().setRecordCount(recordCount).build();
+                    try (final ArrowBuf buffer = rootAllocator.buffer(build.getSerializedSize())) {
+                        buffer.writeBytes(build.toByteArray());
+                        ackStream.onNext(PutResult.metadata(buffer));
+                    }
+                }
+                ackStream.onCompleted();
+            } catch (Exception e) {
+                String errMsg = "acceptPutPreparedStatementUpdate failed, " + e.getMessage() + ", "
+                        + Util.getRootCauseMessage(e);
+                LOG.error(errMsg, e);
+                throw CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException();
+            }
+        };
     }
 
     @Override
@@ -310,7 +449,21 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
 
     @Override
     public void getStreamCatalogs(final CallContext context, final ServerStreamListener listener) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("getStreamCatalogs unimplemented").toRuntimeException();
+        try {
+            ConnectContext connectContext = flightSessionsManager.getConnectContext(context.peerIdentity());
+            FlightSqlSchemaHelper flightSqlSchemaHelper = new FlightSqlSchemaHelper(connectContext);
+            final Schema schema = Schemas.GET_CATALOGS_SCHEMA;
+
+            try (final VectorSchemaRoot vectorSchemaRoot = VectorSchemaRoot.create(schema, rootAllocator)) {
+                listener.start(vectorSchemaRoot);
+                vectorSchemaRoot.allocateNew();
+                flightSqlSchemaHelper.getCatalogs(vectorSchemaRoot);
+                listener.putNext();
+                listener.completed();
+            }
+        } catch (final Exception e) {
+            handleStreamException(e, "", listener);
+        }
     }
 
     @Override
@@ -322,7 +475,22 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
     @Override
     public void getStreamSchemas(final CommandGetDbSchemas command, final CallContext context,
             final ServerStreamListener listener) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("getStreamSchemas unimplemented").toRuntimeException();
+        try {
+            ConnectContext connectContext = flightSessionsManager.getConnectContext(context.peerIdentity());
+            FlightSqlSchemaHelper flightSqlSchemaHelper = new FlightSqlSchemaHelper(connectContext);
+            flightSqlSchemaHelper.setParameterForGetDbSchemas(command);
+            final Schema schema = Schemas.GET_SCHEMAS_SCHEMA;
+
+            try (VectorSchemaRoot vectorSchemaRoot = VectorSchemaRoot.create(schema, rootAllocator)) {
+                listener.start(vectorSchemaRoot);
+                vectorSchemaRoot.allocateNew();
+                flightSqlSchemaHelper.getSchemas(vectorSchemaRoot);
+                listener.putNext();
+                listener.completed();
+            }
+        } catch (final Exception e) {
+            handleStreamException(e, "", listener);
+        }
     }
 
     @Override
@@ -338,7 +506,23 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
     @Override
     public void getStreamTables(final CommandGetTables command, final CallContext context,
             final ServerStreamListener listener) {
-        throw CallStatus.UNIMPLEMENTED.withDescription("getStreamTables unimplemented").toRuntimeException();
+        try {
+            ConnectContext connectContext = flightSessionsManager.getConnectContext(context.peerIdentity());
+            FlightSqlSchemaHelper flightSqlSchemaHelper = new FlightSqlSchemaHelper(connectContext);
+            flightSqlSchemaHelper.setParameterForGetTables(command);
+            final Schema schema = command.getIncludeSchema() ? Schemas.GET_TABLES_SCHEMA
+                    : Schemas.GET_TABLES_SCHEMA_NO_SCHEMA;
+
+            try (VectorSchemaRoot vectorSchemaRoot = VectorSchemaRoot.create(schema, rootAllocator)) {
+                listener.start(vectorSchemaRoot);
+                vectorSchemaRoot.allocateNew();
+                flightSqlSchemaHelper.getTables(vectorSchemaRoot);
+                listener.putNext();
+                listener.completed();
+            }
+        } catch (final Exception e) {
+            handleStreamException(e, "", listener);
+        }
     }
 
     @Override
@@ -361,7 +545,6 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
     @Override
     public void getStreamPrimaryKeys(final CommandGetPrimaryKeys command, final CallContext context,
             final ServerStreamListener listener) {
-
         throw CallStatus.UNIMPLEMENTED.withDescription("getStreamPrimaryKeys unimplemented").toRuntimeException();
     }
 
@@ -404,9 +587,14 @@ public class DorisFlightSqlProducer implements FlightSqlProducer, AutoCloseable 
     private <T extends Message> FlightInfo getFlightInfoForSchema(final T request, final FlightDescriptor descriptor,
             final Schema schema) {
         final Ticket ticket = new Ticket(Any.pack(request).toByteArray());
-        // TODO Support multiple endpoints.
         final List<FlightEndpoint> endpoints = Collections.singletonList(new FlightEndpoint(ticket, location));
 
         return new FlightInfo(schema, descriptor, endpoints, -1, -1);
+    }
+
+    private static void handleStreamException(Exception e, String errMsg, ServerStreamListener listener) {
+        LOG.error(errMsg, e);
+        listener.error(CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException());
+        throw CallStatus.INTERNAL.withDescription(errMsg).withCause(e).toRuntimeException();
     }
 }

@@ -34,10 +34,6 @@ public:
 
     String get_name() const override { return name; }
 
-    bool use_default_implementation_for_nulls() const override { return true; }
-
-    bool use_default_implementation_for_constants() const override { return false; }
-
     bool is_variadic() const override { return true; }
 
     size_t get_number_of_arguments() const override { return 0; }
@@ -47,7 +43,7 @@ public:
     }
 
     Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                        size_t result, size_t input_rows_count) const override {
+                        uint32_t result, size_t input_rows_count) const override {
         DCHECK_GE(arguments.size(), 1);
         block.replace_by_position(result, Impl::execute(block, arguments, input_rows_count));
         return Status::OK();

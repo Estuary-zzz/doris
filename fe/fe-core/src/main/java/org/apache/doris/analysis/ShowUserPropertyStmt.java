@@ -20,7 +20,6 @@ package org.apache.doris.analysis;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.CaseSensibility;
 import org.apache.doris.common.ErrorCode;
@@ -47,7 +46,7 @@ import java.util.Set;
 // Show Property Stmt
 //  syntax:
 //      SHOW [ALL] PROPERTY [FOR user] [LIKE key pattern]
-public class ShowUserPropertyStmt extends ShowStmt {
+public class ShowUserPropertyStmt extends ShowStmt implements NotFallbackInParser {
     private static final Logger LOG = LogManager.getLogger(ShowUserPropertyStmt.class);
 
     private String user;
@@ -68,7 +67,6 @@ public class ShowUserPropertyStmt extends ShowStmt {
             if (isAll) {
                 throw new AnalysisException("Can not specified keyword ALL when specified user");
             }
-            user = ClusterNamespace.getFullName(getClusterName(), user);
         } else {
             if (!isAll) {
                 // self
@@ -127,7 +125,7 @@ public class ShowUserPropertyStmt extends ShowStmt {
     private Map<String, String> getRowsForUser(String user) throws AnalysisException {
         Map<String, String> result = Maps.newHashMap();
         List<List<String>> userProperties = Env.getCurrentEnv().getAuth()
-                .getUserProperties(ClusterNamespace.getFullName(getClusterName(), user));
+                .getUserProperties(user);
         PatternMatcher matcher = null;
         if (pattern != null) {
             matcher = PatternMatcherWrapper.createMysqlPattern(pattern,

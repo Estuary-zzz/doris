@@ -33,6 +33,7 @@
 #include "runtime/define_primitive_type.h"
 #include "runtime/primitive_type.h"
 #include "runtime/types.h"
+#include "util/profile_collector.h"
 #include "util/runtime_profile.h"
 #include "util/string_util.h"
 #include "vec/aggregate_functions/aggregate_function.h"
@@ -48,8 +49,6 @@ template <typename T>
 class ColumnDecimal;
 template <typename T>
 class ColumnVector;
-template <typename T>
-struct Decimal;
 } // namespace vectorized
 } // namespace doris
 
@@ -58,7 +57,7 @@ namespace doris::vectorized {
 /**
  * Connector to java jni scanner, which should extend org.apache.doris.common.jni.JniScanner
  */
-class JniConnector {
+class JniConnector : public ProfileCollector {
 public:
     class TableMetaAddress {
     private:
@@ -94,20 +93,18 @@ public:
     struct ScanPredicate {
         ScanPredicate() = default;
         ~ScanPredicate() = default;
-        const std::string column_name;
+        std::string column_name;
         SQLFilterOp op;
         std::vector<const CppType*> values;
         int scale;
 
         ScanPredicate(const std::string column_name) : column_name(std::move(column_name)) {}
 
-        ScanPredicate(const ScanPredicate& other) {
-            column_name = other.column_name;
-            op = other.op;
+        ScanPredicate(const ScanPredicate& other)
+                : column_name(other.column_name), op(other.op), scale(other.scale) {
             for (auto v : other.values) {
                 values.emplace_back(v);
             }
-            scale = other.scale;
         }
 
         int length() {
@@ -165,6 +162,9 @@ public:
                     char_ptr += s->size;
                 }
             } else {
+                // FIXME: it can not handle decimal type correctly.
+                // but this logic is deprecated and not used.
+                // so may be deleted or fixed later.
                 for (const CppType* v : values) {
                     int type_len = sizeof(CppType);
                     *reinterpret_cast<int*>(char_ptr) = type_len;
@@ -206,8 +206,7 @@ public:
         _is_table_schema = true;
     }
 
-    /// Should release jni resources if other functions are failed.
-    ~JniConnector();
+    ~JniConnector() override = default;
 
     /**
      * Open java scanner, and get the following scanner methods by jni:
@@ -236,7 +235,7 @@ public:
      *                            | data column start address of the variable length column-B |
      *                            | ... |
      */
-    Status get_nex_block(Block* block, size_t* read_rows, bool* eof);
+    Status get_next_block(Block* block, size_t* read_rows, bool* eof);
 
     /**
      * Get performance metrics from java scanner
@@ -275,6 +274,9 @@ public:
 
     static Status fill_block(Block* block, const ColumnNumbers& arguments, long table_address);
 
+protected:
+    void _collect_profile_before_close() override;
+
 private:
     std::string _connector_name;
     std::string _connector_class;
@@ -282,17 +284,17 @@ private:
     std::vector<std::string> _column_names;
     bool _is_table_schema = false;
 
-    RuntimeState* _state;
-    RuntimeProfile* _profile;
-    RuntimeProfile::Counter* _open_scanner_time;
-    RuntimeProfile::Counter* _java_scan_time;
-    RuntimeProfile::Counter* _fill_block_time;
+    RuntimeState* _state = nullptr;
+    RuntimeProfile* _profile = nullptr;
+    RuntimeProfile::Counter* _open_scanner_time = nullptr;
+    RuntimeProfile::Counter* _java_scan_time = nullptr;
+    RuntimeProfile::Counter* _fill_block_time = nullptr;
     std::map<std::string, RuntimeProfile::Counter*> _scanner_profile;
 
     size_t _has_read = 0;
 
     bool _closed = false;
-    bool _scanner_initialized = false;
+    bool _scanner_opened = false;
     jclass _jni_scanner_cls;
     jobject _jni_scanner_obj;
     jmethodID _jni_scanner_open;
@@ -306,7 +308,7 @@ private:
     TableMetaAddress _table_meta;
 
     int _predicates_length = 0;
-    std::unique_ptr<char[]> _predicates = nullptr;
+    std::unique_ptr<char[]> _predicates;
 
     /**
      * Set the address of meta information, which is returned by org.apache.doris.common.jni.JniScanner#getNextBatchMeta
@@ -332,13 +334,13 @@ private:
     static Status _fill_struct_column(TableMetaAddress& address, MutableColumnPtr& doris_column,
                                       DataTypePtr& data_type, size_t num_rows);
 
-    static Status _fill_column_meta(ColumnPtr& doris_column, DataTypePtr& data_type,
+    static Status _fill_column_meta(const ColumnPtr& doris_column, const DataTypePtr& data_type,
                                     std::vector<long>& meta_data);
 
     template <typename COLUMN_TYPE, typename CPP_TYPE>
     static Status _fill_fixed_length_column(MutableColumnPtr& doris_column, CPP_TYPE* ptr,
                                             size_t num_rows) {
-        auto& column_data = static_cast<COLUMN_TYPE&>(*doris_column).get_data();
+        auto& column_data = assert_cast<COLUMN_TYPE&>(*doris_column).get_data();
         size_t origin_size = column_data.size();
         column_data.resize(origin_size + num_rows);
         memcpy(column_data.data() + origin_size, ptr, sizeof(CPP_TYPE) * num_rows);
@@ -346,8 +348,8 @@ private:
     }
 
     template <typename COLUMN_TYPE>
-    static long _get_fixed_length_column_address(MutableColumnPtr& doris_column) {
-        return (long)static_cast<COLUMN_TYPE&>(*doris_column).get_data().data();
+    static long _get_fixed_length_column_address(const IColumn& doris_column) {
+        return (long)assert_cast<const COLUMN_TYPE&>(doris_column).get_data().data();
     }
 
     void _generate_predicates(

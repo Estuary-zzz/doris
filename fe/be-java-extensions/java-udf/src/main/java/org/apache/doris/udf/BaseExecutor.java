@@ -17,11 +17,13 @@
 
 package org.apache.doris.udf;
 
+import org.apache.doris.catalog.ArrayType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.exception.InternalException;
 import org.apache.doris.common.exception.UdfRuntimeException;
 import org.apache.doris.common.jni.utils.JavaUdfDataType;
 import org.apache.doris.common.jni.vec.ColumnValueConverter;
+import org.apache.doris.common.jni.vec.VectorTable;
 import org.apache.doris.thrift.TFunction;
 import org.apache.doris.thrift.TJavaUdfExecutorCtorParams;
 import org.apache.doris.thrift.TPrimitiveType;
@@ -36,20 +38,14 @@ import java.io.IOException;
 import java.net.URLClassLoader;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Map.Entry;
 
 public abstract class BaseExecutor {
     private static final Logger LOG = Logger.getLogger(BaseExecutor.class);
 
-    // By convention, the function in the class must be called evaluate()
-    public static final String UDF_FUNCTION_NAME = "evaluate";
-    public static final String UDAF_CREATE_FUNCTION = "create";
-    public static final String UDAF_DESTROY_FUNCTION = "destroy";
-    public static final String UDAF_ADD_FUNCTION = "add";
-    public static final String UDAF_RESET_FUNCTION = "reset";
-    public static final String UDAF_SERIALIZE_FUNCTION = "serialize";
-    public static final String UDAF_DESERIALIZE_FUNCTION = "deserialize";
-    public static final String UDAF_MERGE_FUNCTION = "merge";
-    public static final String UDAF_RESULT_FUNCTION = "getValue";
 
     // Object to deserialize ctor params from BE.
     protected static final TBinaryProtocol.Factory PROTOCOL_FACTORY = new TBinaryProtocol.Factory();
@@ -65,7 +61,9 @@ public abstract class BaseExecutor {
     protected JavaUdfDataType retType;
     protected Class[] argClass;
     protected MethodAccess methodAccess;
+    protected VectorTable outputTable = null;
     protected TFunction fn;
+    protected Class retClass;
 
     /**
      * Create a UdfExecutor, using parameters from a serialized thrift object. Used
@@ -88,6 +86,9 @@ public abstract class BaseExecutor {
         fn = request.fn;
         String jarFile = request.location;
         Type funcRetType = Type.fromThrift(request.fn.ret_type);
+        if (request.fn.is_udtf_function) {
+            funcRetType = ArrayType.create(funcRetType, true);
+        }
         init(request, jarFile, funcRetType, parameterTypes);
     }
 
@@ -95,32 +96,8 @@ public abstract class BaseExecutor {
         StringBuilder res = new StringBuilder();
         for (JavaUdfDataType type : argTypes) {
             res.append(type.toString());
-            if (type.getItemType() != null) {
-                res.append(" item: ").append(type.getItemType().toString()).append(" sql: ")
-                        .append(type.getItemType().toSql());
-            }
-            if (type.getKeyType() != null) {
-                res.append(" key: ").append(type.getKeyType().toString()).append(" sql: ")
-                        .append(type.getKeyType().toSql());
-            }
-            if (type.getValueType() != null) {
-                res.append(" key: ").append(type.getValueType().toString()).append(" sql: ")
-                        .append(type.getValueType().toSql());
-            }
         }
         res.append(" return type: ").append(retType.toString());
-        if (retType.getItemType() != null) {
-            res.append(" item: ").append(retType.getItemType().toString()).append(" sql: ")
-                    .append(retType.getItemType().toSql());
-        }
-        if (retType.getKeyType() != null) {
-            res.append(" key: ").append(retType.getKeyType().toString()).append(" sql: ")
-                    .append(retType.getKeyType().toSql());
-        }
-        if (retType.getValueType() != null) {
-            res.append(" key: ").append(retType.getValueType().toString()).append(" sql: ")
-                    .append(retType.getValueType().toSql());
-        }
         res.append(" methodAccess: ").append(methodAccess.toString());
         res.append(" fn.toString(): ").append(fn.toString());
         return res.toString();
@@ -138,12 +115,19 @@ public abstract class BaseExecutor {
                 classLoader.close();
             } catch (IOException e) {
                 // Log and ignore.
-                LOG.debug("Error closing the URLClassloader.", e);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Error closing the URLClassloader.", e);
+                }
             }
+        }
+        // Close the output table if it exists.
+        if (outputTable != null) {
+            outputTable.close();
         }
         // We are now un-usable (because the class loader has been
         // closed), so null out method_ and classLoader_.
         classLoader = null;
+        methodAccess = null;
     }
 
     protected ColumnValueConverter getInputConverter(TPrimitiveType primitiveType, Class clz) {
@@ -212,14 +196,30 @@ public abstract class BaseExecutor {
                 }
                 break;
             }
+            case STRUCT: {
+                return (Object[] columnData) -> {
+                    Object[] result = new ArrayList[columnData.length];
+                    for (int i = 0; i < columnData.length; ++i) {
+                        if (columnData[i] != null) {
+                            HashMap<String, Object> value = (HashMap<String, Object>) columnData[i];
+                            ArrayList<Object> elements = new ArrayList<>();
+                            for (Entry<String, Object> entry : value.entrySet()) {
+                                elements.add(entry.getValue());
+                            }
+                            result[i] = elements;
+                        }
+                    }
+                    return result;
+                };
+            }
             default:
                 break;
         }
         return null;
     }
 
-    protected ColumnValueConverter getOutputConverter(TPrimitiveType primitiveType, Class clz) {
-        switch (primitiveType) {
+    protected ColumnValueConverter getOutputConverter(JavaUdfDataType returnType, Class clz) {
+        switch (returnType.getPrimitiveType()) {
             case DATE:
             case DATEV2: {
                 if (java.util.Date.class.equals(clz)) {
@@ -282,9 +282,44 @@ public abstract class BaseExecutor {
                 }
                 break;
             }
+            case STRUCT: {
+                return (Object[] columnData) -> {
+                    Object[] result = (HashMap<String, Object>[]) new HashMap<?, ?>[columnData.length];
+                    ArrayList<String> names = returnType.getFieldNames();
+                    for (int i = 0; i < columnData.length; ++i) {
+                        HashMap<String, Object> elements = new HashMap<String, Object>();
+                        if (columnData[i] != null) {
+                            ArrayList<Object> v = (ArrayList<Object>) columnData[i];
+                            for (int k = 0; k < v.size(); ++k) {
+                                elements.put(names.get(k), v.get(k));
+                            }
+                            result[i] = elements;
+                        }
+                    }
+                    return result;
+                };
+            }
             default:
                 break;
         }
         return null;
+    }
+
+    // Add unified converter methods
+    protected Map<Integer, ColumnValueConverter> getInputConverters(int numColumns, boolean isUdaf) {
+        Map<Integer, ColumnValueConverter> converters = new HashMap<>();
+        for (int j = 0; j < numColumns; ++j) {
+            // For UDAF, we need to offset by 1 since first arg is state
+            int argIndex = isUdaf ? j + 1 : j;
+            ColumnValueConverter converter = getInputConverter(argTypes[j].getPrimitiveType(), argClass[argIndex]);
+            if (converter != null) {
+                converters.put(j, converter);
+            }
+        }
+        return converters;
+    }
+
+    protected ColumnValueConverter getOutputConverter() {
+        return getOutputConverter(retType, retClass);
     }
 }

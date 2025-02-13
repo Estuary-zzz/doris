@@ -28,6 +28,7 @@
 #include "vec/exprs/vexpr_fwd.h"
 
 namespace doris::vectorized {
+#include "common/compile_check_begin.h"
 
 class VFileFormatTransformer {
 public:
@@ -53,7 +54,7 @@ public:
     virtual int64_t written_len() = 0;
 
 protected:
-    RuntimeState* _state; // not owned, set when init
+    RuntimeState* _state = nullptr; // not owned, set when init
     const VExprContextSPtrs& _output_vexpr_ctxs;
     int64_t _cur_written_rows;
     bool _output_object_data;
@@ -61,3 +62,5 @@ protected:
     vectorized::DataTypeSerDe::FormatOptions _options;
 };
 } // namespace doris::vectorized
+
+#include "common/compile_check_end.h"

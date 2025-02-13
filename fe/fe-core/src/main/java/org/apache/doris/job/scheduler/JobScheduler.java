@@ -17,6 +17,8 @@
 
 package org.apache.doris.job.scheduler;
 
+import org.apache.doris.catalog.Env;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.CustomThreadFactory;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.job.base.AbstractJob;
@@ -30,7 +32,7 @@ import org.apache.doris.job.manager.TaskDisruptorGroupManager;
 import org.apache.doris.job.task.AbstractTask;
 
 import io.netty.util.HashedWheelTimer;
-import lombok.extern.slf4j.Slf4j;
+import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections.CollectionUtils;
 
 import java.io.Closeable;
@@ -39,8 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-@Slf4j
-public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
+@Log4j2
+public class JobScheduler<T extends AbstractJob<?, C>, C> implements Closeable {
 
     /**
      * scheduler tasks, it's used to scheduler job
@@ -53,7 +55,7 @@ public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
 
     private long latestBatchSchedulerTimerTaskTimeMs = 0L;
 
-    private static final long BATCH_SCHEDULER_INTERVAL_SECONDS = 60;
+    private static final long BATCH_SCHEDULER_INTERVAL_SECONDS = 600;
 
     private static final int HASHED_WHEEL_TIMER_TICKS_PER_WHEEL = 660;
 
@@ -68,6 +70,13 @@ public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
      */
     private static final long BATCH_SCHEDULER_INTERVAL_MILLI_SECONDS = BATCH_SCHEDULER_INTERVAL_SECONDS * 1000L;
 
+    /**
+     * Finished job will be cleared after 24 hours
+     */
+    private static final long FINISHED_JOB_CLEANUP_THRESHOLD_TIME_MS =
+            (Config.finished_job_cleanup_threshold_time_hour > 0
+                    ? Config.finished_job_cleanup_threshold_time_hour : 24) * 3600 * 1000L;
+
     public void start() {
         timerTaskScheduler = new HashedWheelTimer(new CustomThreadFactory("timer-task-scheduler"), 1,
                 TimeUnit.SECONDS, HASHED_WHEEL_TIMER_TICKS_PER_WHEEL);
@@ -75,7 +84,8 @@ public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
         taskDisruptorGroupManager = new TaskDisruptorGroupManager();
         taskDisruptorGroupManager.init();
         this.timerJobDisruptor = taskDisruptorGroupManager.getDispatchDisruptor();
-        latestBatchSchedulerTimerTaskTimeMs = System.currentTimeMillis();
+        long currentTimeMs = TimeUtils.convertToSecondTimestamp(System.currentTimeMillis());
+        latestBatchSchedulerTimerTaskTimeMs = currentTimeMs;
         batchSchedulerTimerJob();
         cycleSystemSchedulerTasks();
     }
@@ -85,7 +95,8 @@ public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
      * Jobs will be re-registered after the task is completed
      */
     private void cycleSystemSchedulerTasks() {
-        log.info("re-register system scheduler timer tasks" + TimeUtils.longToTimeString(System.currentTimeMillis()));
+        log.info("re-register system scheduler timer tasks, time is " + TimeUtils
+                .longToTimeStringWithms(System.currentTimeMillis()));
         timerTaskScheduler.newTimeout(timeout -> {
             batchSchedulerTimerJob();
             cycleSystemSchedulerTasks();
@@ -104,15 +115,28 @@ public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
         if (!job.getJobConfig().checkIsTimerJob()) {
             //manual job will not scheduler
             if (JobExecuteType.MANUAL.equals(job.getJobConfig().getExecuteType())) {
+                if (job.getJobConfig().isImmediate()) {
+                    schedulerInstantJob(job, TaskType.MANUAL, null);
+                }
                 return;
             }
+
             //todo skip streaming job,improve in the future
             if (JobExecuteType.INSTANT.equals(job.getJobConfig().getExecuteType())) {
-                schedulerInstantJob(job, TaskType.SCHEDULED);
+                schedulerInstantJob(job, TaskType.SCHEDULED, null);
             }
         }
+        if (job.getJobConfig().isImmediate() && JobExecuteType.ONE_TIME.equals(job.getJobConfig().getExecuteType())) {
+            schedulerInstantJob(job, TaskType.SCHEDULED, null);
+            return;
+        }
+        //RECURRING job and  immediate is true
+        if (job.getJobConfig().isImmediate()) {
+            job.getJobConfig().getTimerDefinition().setLatestSchedulerTimeMs(System.currentTimeMillis());
+            schedulerInstantJob(job, TaskType.SCHEDULED, null);
+        }
         //if it's timer job and trigger last window already start, we will scheduler it immediately
-        cycleTimerJobScheduler(job);
+        cycleTimerJobScheduler(job, System.currentTimeMillis());
     }
 
     @Override
@@ -121,9 +145,16 @@ public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
     }
 
 
-    private void cycleTimerJobScheduler(T job) {
-        List<Long> delaySeconds = job.getJobConfig().getTriggerDelayTimes(System.currentTimeMillis(),
-                System.currentTimeMillis(), latestBatchSchedulerTimerTaskTimeMs);
+    private void cycleTimerJobScheduler(T job, long startTimeWindowMs) {
+        long currentTimeMs = TimeUtils.convertToSecondTimestamp(System.currentTimeMillis());
+        startTimeWindowMs = TimeUtils.convertToSecondTimestamp(startTimeWindowMs);
+        List<Long> delaySeconds = job.getJobConfig().getTriggerDelayTimes(currentTimeMs,
+                startTimeWindowMs, latestBatchSchedulerTimerTaskTimeMs);
+        if (CollectionUtils.isEmpty(delaySeconds)) {
+            log.info("skip job {} scheduler timer job, delay seconds is empty", job.getJobName());
+            return;
+        }
+        log.info("job {} scheduler timer job, delay seconds size is {}", job.getJobName(), delaySeconds.size());
         if (CollectionUtils.isNotEmpty(delaySeconds)) {
             delaySeconds.forEach(delaySecond -> {
                 TimerJobSchedulerTask<T> timerJobSchedulerTask = new TimerJobSchedulerTask<>(timerJobDisruptor, job);
@@ -133,43 +164,66 @@ public class JobScheduler<T extends AbstractJob<?>> implements Closeable {
     }
 
 
-    public void schedulerInstantJob(T job, TaskType taskType) throws JobException {
-        if (!job.getJobStatus().equals(JobStatus.RUNNING)) {
-            throw new JobException("job is not running,job id is %d", job.getJobId());
-        }
-        if (!job.isReadyForScheduling()) {
-            log.info("job is not ready for scheduling,job id is {}", job.getJobId());
-            return;
-        }
-        List<? extends AbstractTask> tasks = job.createTasks(taskType);
+    public void schedulerInstantJob(T job, TaskType taskType, C context) throws JobException {
+        List<? extends AbstractTask> tasks = job.commonCreateTasks(taskType, context);
         if (CollectionUtils.isEmpty(tasks)) {
+            log.info("job create task is empty, skip scheduler, job id is {}, job name is {}", job.getJobId(),
+                    job.getJobName());
             if (job.getJobConfig().getExecuteType().equals(JobExecuteType.INSTANT)) {
                 job.setJobStatus(JobStatus.FINISHED);
             }
             return;
         }
-        tasks.forEach(task -> taskDisruptorGroupManager.dispatchInstantTask(task, job.getJobType(),
-                job.getJobConfig()));
+        for (AbstractTask task : tasks) {
+            if (!taskDisruptorGroupManager.dispatchInstantTask(task, job.getJobType(),
+                    job.getJobConfig())) {
+                String errorMsg = job.formatMsgWhenExecuteQueueFull(task.getTaskId());
+                task.onFail(errorMsg);
+                throw new JobException(errorMsg);
 
+            }
+            log.info("dispatch instant job, job id is {}, job name is {}, task id is {}", job.getJobId(),
+                    job.getJobName(), task.getTaskId());
+        }
     }
 
     /**
      * We will get the task in the next time window, and then hand it over to the time wheel for timing trigger
      */
     private void executeTimerJobIdsWithinLastTenMinutesWindow() {
+
+        long lastTimeWindowMs = latestBatchSchedulerTimerTaskTimeMs;
+        if (latestBatchSchedulerTimerTaskTimeMs < System.currentTimeMillis()) {
+            long currentTimeMs = TimeUtils.convertToSecondTimestamp(System.currentTimeMillis());
+            this.latestBatchSchedulerTimerTaskTimeMs = currentTimeMs;
+        }
+        this.latestBatchSchedulerTimerTaskTimeMs += BATCH_SCHEDULER_INTERVAL_MILLI_SECONDS;
+        log.info("execute timer job ids within last ten minutes window, last time window is {}",
+                TimeUtils.longToTimeString(lastTimeWindowMs));
         if (jobMap.isEmpty()) {
             return;
         }
-        if (latestBatchSchedulerTimerTaskTimeMs < System.currentTimeMillis()) {
-            this.latestBatchSchedulerTimerTaskTimeMs = System.currentTimeMillis();
-        }
-        this.latestBatchSchedulerTimerTaskTimeMs += BATCH_SCHEDULER_INTERVAL_MILLI_SECONDS;
         for (Map.Entry<Long, T> entry : jobMap.entrySet()) {
             T job = entry.getValue();
-            if (!job.getJobConfig().checkIsTimerJob()) {
+            if (job.getJobStatus().equals(JobStatus.FINISHED) || job.getJobStatus().equals(JobStatus.STOPPED)) {
+                clearEndJob(job);
                 continue;
             }
-            cycleTimerJobScheduler(job);
+            if (job.getJobStatus().equals(JobStatus.RUNNING) && job.getJobConfig().checkIsTimerJob()) {
+                cycleTimerJobScheduler(job, lastTimeWindowMs);
+            }
+        }
+    }
+
+    private void clearEndJob(T job) {
+        if (job.getFinishTimeMs() + FINISHED_JOB_CLEANUP_THRESHOLD_TIME_MS > System.currentTimeMillis()) {
+            return;
+        }
+        try {
+            Env.getCurrentEnv().getJobManager().unregisterJob(job.getJobId());
+            log.info("clear finish job, job id is {}, job name is {}", job.getJobId(), job.getJobName());
+        } catch (JobException e) {
+            log.error("clear finish job error, job id is {}", job.getJobId(), e);
         }
     }
 }

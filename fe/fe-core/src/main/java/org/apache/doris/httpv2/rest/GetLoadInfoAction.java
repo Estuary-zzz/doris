@@ -40,10 +40,9 @@ import javax.servlet.http.HttpServletResponse;
 //     "status": "OK",
 //     "msg": "Success",
 //     "jobInfo": {
-//         "dbName": "default_cluster:db1",
+//         "dbName": "db1",
 //         "tblNames": ["tbl1"],
 //         "label": "abc",
-//         "clusterName": "default_cluster",
 //         "state": "FINISHED",
 //         "failMsg": "",
 //         "trackingUrl": "\\N"
@@ -56,26 +55,23 @@ public class GetLoadInfoAction extends RestBaseController {
     public Object execute(
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response) {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
         executeCheckPassword(request, response);
 
         String fullDbName = getFullDbName(dbName);
 
         Load.JobInfo info = new Load.JobInfo(fullDbName,
-                request.getParameter(LABEL_KEY),
-                ConnectContext.get().getClusterName());
+                request.getParameter(LABEL_KEY));
         if (Strings.isNullOrEmpty(info.dbName)) {
             return new RestBaseResult("No database selected");
         }
         if (Strings.isNullOrEmpty(info.label)) {
             return new RestBaseResult("No label selected");
         }
-        if (Strings.isNullOrEmpty(info.clusterName)) {
-            return new RestBaseResult("No cluster selected");
-        }
-
-        Object redirectView = redirectToMaster(request, response);
-        if (redirectView != null) {
-            return redirectView;
+        if (checkForwardToMaster(request)) {
+            return forwardToMaster(request);
         }
 
         try {

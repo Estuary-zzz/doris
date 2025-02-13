@@ -81,19 +81,15 @@ fi
 if [[ ${SCALE_FACTOR} -eq 1 ]]; then
     echo "Running tpcds sf 1 queries"
     TPCDS_QUERIES_DIR="${CURDIR}/../queries/sf1"
-    TPCDS_OPT_CONF="${CURDIR}/../conf/opt/opt_sf1.sql"
 elif [[ ${SCALE_FACTOR} -eq 100 ]]; then
     echo "Running tpcds sf 100 queries"
     TPCDS_QUERIES_DIR="${CURDIR}/../queries/sf100"
-    TPCDS_OPT_CONF="${CURDIR}/../conf/opt/opt_sf100.sql"
 elif [[ ${SCALE_FACTOR} -eq 1000 ]]; then
     echo "Running tpcds sf 1000 queries"
     TPCDS_QUERIES_DIR="${CURDIR}/../queries/sf1000"
-    TPCDS_OPT_CONF="${CURDIR}/../conf/opt/opt_sf1000.sql"
 elif [[ ${SCALE_FACTOR} -eq 10000 ]]; then
     echo "Running tpcds sf 10000 queries"
     TPCDS_QUERIES_DIR="${CURDIR}/../queries/sf10000"
-    TPCDS_OPT_CONF="${CURDIR}/../conf/opt/opt_sf10000.sql"
 else
     echo "${SCALE_FACTOR} scale is NOT support currently."
     exit 1
@@ -125,8 +121,6 @@ run_sql() {
 }
 
 echo '============================================'
-run_sql "source ${TPCDS_OPT_CONF};"
-echo '============================================'
 run_sql "show variables;"
 echo '============================================'
 run_sql "show table status;"
@@ -150,19 +144,31 @@ for i in ${query_array[@]}; do
     hot2=0
     echo -ne "query${i}\t" | tee -a result.csv
     start=$(date +%s%3N)
-    mysql -h"${FE_HOST}" -u"${USER}" -P"${FE_QUERY_PORT}" -D"${DB}" --comments <"${TPCDS_QUERIES_DIR}"/query"${i}".sql >"${RESULT_DIR}"/result"${i}".out 2>"${RESULT_DIR}"/result"${i}".log
+    if ! output=$(mysql -h"${FE_HOST}" -u"${USER}" -P"${FE_QUERY_PORT}" -D"${DB}" --comments \
+        <"${TPCDS_QUERIES_DIR}/query${i}.sql" 2>&1); then
+        printf "Error: Failed to execute query q%s (cold run). Output:\n%s\n" "${i}" "${output}" >&2
+        continue
+    fi
     end=$(date +%s%3N)
     cold=$((end - start))
     echo -ne "${cold}\t" | tee -a result.csv
 
     start=$(date +%s%3N)
-    mysql -h"${FE_HOST}" -u"${USER}" -P"${FE_QUERY_PORT}" -D"${DB}" --comments <"${TPCDS_QUERIES_DIR}"/query"${i}".sql >"${RESULT_DIR}"/result"${i}".out 2>"${RESULT_DIR}"/result"${i}".log
+    if ! output=$(mysql -h"${FE_HOST}" -u"${USER}" -P"${FE_QUERY_PORT}" -D"${DB}" --comments \
+        <"${TPCDS_QUERIES_DIR}/query${i}.sql" 2>&1); then
+        printf "Error: Failed to execute query q%s (hot run 1). Output:\n%s\n" "${i}" "${output}" >&2
+        continue
+    fi
     end=$(date +%s%3N)
     hot1=$((end - start))
     echo -ne "${hot1}\t" | tee -a result.csv
 
     start=$(date +%s%3N)
-    mysql -h"${FE_HOST}" -u"${USER}" -P"${FE_QUERY_PORT}" -D"${DB}" --comments <"${TPCDS_QUERIES_DIR}"/query"${i}".sql >"${RESULT_DIR}"/result"${i}".out 2>"${RESULT_DIR}"/result"${i}".log
+    if ! output=$(mysql -h"${FE_HOST}" -u"${USER}" -P"${FE_QUERY_PORT}" -D"${DB}" --comments \
+        <"${TPCDS_QUERIES_DIR}/query${i}.sql" 2>&1); then
+        printf "Error: Failed to execute query q%s (hot run 2). Output:\n%s\n" "${i}" "${output}" >&2
+        continue
+    fi
     end=$(date +%s%3N)
     hot2=$((end - start))
     echo -ne "${hot2}\t" | tee -a result.csv

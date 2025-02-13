@@ -22,7 +22,6 @@ package org.apache.doris.nereids.trees.plans.commands.info;
 
 import org.apache.doris.analysis.TableName;
 import org.apache.doris.catalog.Env;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.datasource.InternalCatalog;
@@ -103,12 +102,10 @@ public class TableNameInfo implements Writable {
             }
         }
         if (Strings.isNullOrEmpty(db)) {
-            db = ClusterNamespace.getFullName(ctx.getClusterName(), ctx.getDatabase());
+            db = ctx.getDatabase();
             if (Strings.isNullOrEmpty(db)) {
                 throw new AnalysisException("No database selected");
             }
-        } else {
-            db = ClusterNamespace.getFullName(ctx.getClusterName(), db);
         }
 
         if (Strings.isNullOrEmpty(tbl)) {
@@ -130,6 +127,14 @@ public class TableNameInfo implements Writable {
      */
     public String getDb() {
         return db;
+    }
+
+    /**
+     * set a new database name
+     * @param db new database name
+     */
+    public void setDb(String db) {
+        this.db = db;
     }
 
     /**
@@ -164,5 +169,43 @@ public class TableNameInfo implements Writable {
         ctl = fromJson.ctl;
         db = fromJson.db;
         tbl = fromJson.tbl;
+    }
+
+    /**
+     * equals
+     */
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        TableNameInfo that = (TableNameInfo) o;
+        return tbl.equals(that.tbl) && db.equals(that.db) && ctl.equals(that.ctl);
+    }
+
+    /**
+     * hashCode
+     */
+    @Override
+    public int hashCode() {
+        return Objects.hash(tbl, db, ctl);
+    }
+
+    /**
+     * toSql
+     */
+    public String toSql() {
+        StringBuilder stringBuilder = new StringBuilder();
+        if (ctl != null && !ctl.equals(InternalCatalog.INTERNAL_CATALOG_NAME)) {
+            stringBuilder.append("`").append(ctl).append("`.");
+        }
+        if (db != null) {
+            stringBuilder.append("`").append(db).append("`.");
+        }
+        stringBuilder.append("`").append(tbl).append("`");
+        return stringBuilder.toString();
     }
 }

@@ -28,11 +28,14 @@
 #include <boost/core/noncopyable.hpp>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "common/exception.h"
 #include "common/status.h"
 #include "runtime/define_primitive_type.h"
+#include "vec/columns/column_const.h"
+#include "vec/columns/column_string.h"
 #include "vec/common/cow.h"
 #include "vec/core/types.h"
 #include "vec/data_types/serde/data_type_serde.h"
@@ -42,7 +45,7 @@ class PColumnMeta;
 enum PGenericType_TypeId : int;
 
 namespace vectorized {
-
+#include "common/compile_check_begin.h"
 class IDataType;
 class IColumn;
 class BufferWritable;
@@ -55,6 +58,13 @@ class Field;
 
 using DataTypePtr = std::shared_ptr<const IDataType>;
 using DataTypes = std::vector<DataTypePtr>;
+constexpr auto SERIALIZED_MEM_SIZE_LIMIT = 256;
+
+template <typename T>
+T upper_int32(T size) {
+    static_assert(std::is_unsigned_v<T>);
+    return T(static_cast<double>(3 + size) / 4.0);
+}
 
 /** Properties of data type.
   * Contains methods for serialization/deserialization.
@@ -82,6 +92,8 @@ public:
 
     virtual void to_string(const IColumn& column, size_t row_num, BufferWritable& ostr) const;
     virtual std::string to_string(const IColumn& column, size_t row_num) const;
+
+    virtual void to_string_batch(const IColumn& column, ColumnString& column_to) const;
     // only for compound type now.
     virtual Status from_string(ReadBuffer& rb, IColumn* column) const;
 
@@ -108,21 +120,8 @@ public:
 
     virtual Field get_field(const TExprNode& node) const = 0;
 
-    /** Directly insert default value into a column. Default implementation use method IColumn::insert_default.
-      * This should be overridden if data type default value differs from column default value (example: Enum data types).
-      */
-    virtual void insert_default_into(IColumn& column) const;
-
     /// Checks that two instances belong to the same type
     virtual bool equals(const IDataType& rhs) const = 0;
-
-    /// Various properties on behaviour of data type.
-
-    /** The data type is dependent on parameters and types with different parameters are different.
-      * Examples: FixedString(N), Tuple(T1, T2), Nullable(T).
-      * Otherwise all instances of the same class are the same types.
-      */
-    virtual bool get_is_parametric() const = 0;
 
     /** The data type is dependent on parameters and at least one of them is another type.
       * Examples: Tuple(T1, T2), Nullable(T). But FixedString(N) is not.
@@ -152,16 +151,6 @@ public:
       */
     virtual bool is_value_represented_by_number() const { return false; }
 
-    /** Integers, Enums, Date, DateTime. Not nullable.
-      */
-    virtual bool is_value_represented_by_integer() const { return false; }
-
-    virtual bool is_object() const { return false; }
-
-    /** Unsigned Integers, Date, DateTime. Not nullable.
-      */
-    virtual bool is_value_represented_by_unsigned_integer() const { return false; }
-
     /** Values are unambiguously identified by contents of contiguous memory region,
       *  that can be obtained by IColumn::get_data_at method.
       * Examples: numbers, Date, DateTime, String, FixedString,
@@ -173,31 +162,17 @@ public:
         return false;
     }
 
-    virtual bool is_value_unambiguously_represented_in_fixed_size_contiguous_memory_region() const {
-        return is_value_represented_by_number();
-    }
-
     /** Example: numbers, Date, DateTime, FixedString, Enum... Nullable and Tuple of such types.
       * Counterexamples: String, Array.
       * It's Ok to return false for AggregateFunction despite the fact that some of them have fixed size state.
       */
     virtual bool have_maximum_size_of_value() const { return false; }
 
-    /** Size in amount of bytes in memory. Throws an exception if not have_maximum_size_of_value.
-      */
-    virtual size_t get_maximum_size_of_value_in_memory() const {
-        return get_size_of_value_in_memory();
-    }
-
     /** Throws an exception if value is not of fixed size.
       */
     virtual size_t get_size_of_value_in_memory() const;
 
     virtual bool is_nullable() const { return false; }
-
-    /** Is this type can represent only NULL value? (It also implies is_nullable)
-      */
-    virtual bool only_null() const { return false; }
 
     /* the data type create from type_null, NULL literal*/
     virtual bool is_null_literal() const { return false; }
@@ -207,13 +182,10 @@ public:
     /// Strings, Numbers, Date, DateTime, Nullable
     virtual bool can_be_inside_low_cardinality() const { return false; }
 
-    /// Updates avg_value_size_hint for newly read column. Uses to optimize deserialization. Zero expected for first column.
-    static void update_avg_value_size_hint(const IColumn& column, double& avg_value_size_hint);
-
     virtual int64_t get_uncompressed_serialized_bytes(const IColumn& column,
                                                       int be_exec_version) const = 0;
     virtual char* serialize(const IColumn& column, char* buf, int be_exec_version) const = 0;
-    virtual const char* deserialize(const char* buf, IColumn* column,
+    virtual const char* deserialize(const char* buf, MutableColumnPtr* column,
                                     int be_exec_version) const = 0;
 
     virtual void to_pb_column_meta(PColumnMeta* col_meta) const;
@@ -266,11 +238,11 @@ struct WhichDataType {
 
     bool is_decimal32() const { return idx == TypeIndex::Decimal32; }
     bool is_decimal64() const { return idx == TypeIndex::Decimal64; }
-    bool is_decimal128() const { return idx == TypeIndex::Decimal128; }
-    bool is_decimal128i() const { return idx == TypeIndex::Decimal128I; }
+    bool is_decimal128v2() const { return idx == TypeIndex::Decimal128V2; }
+    bool is_decimal128v3() const { return idx == TypeIndex::Decimal128V3; }
     bool is_decimal256() const { return idx == TypeIndex::Decimal256; }
     bool is_decimal() const {
-        return is_decimal32() || is_decimal64() || is_decimal128() || is_decimal128i() ||
+        return is_decimal32() || is_decimal64() || is_decimal128v2() || is_decimal128v3() ||
                is_decimal256();
     }
 
@@ -284,6 +256,10 @@ struct WhichDataType {
     bool is_date_time_v2() const { return idx == TypeIndex::DateTimeV2; }
     bool is_date_or_datetime() const { return is_date() || is_date_time(); }
     bool is_date_v2_or_datetime_v2() const { return is_date_v2() || is_date_time_v2(); }
+
+    bool is_ipv4() const { return idx == TypeIndex::IPv4; }
+    bool is_ipv6() const { return idx == TypeIndex::IPv6; }
+    bool is_ip() const { return is_ipv4() || is_ipv6(); }
 
     bool is_string() const { return idx == TypeIndex::String; }
     bool is_fixed_string() const { return idx == TypeIndex::FixedString; }
@@ -303,46 +279,41 @@ struct WhichDataType {
     bool is_aggregate_function() const { return idx == TypeIndex::AggregateFunction; }
     bool is_variant_type() const { return idx == TypeIndex::VARIANT; }
     bool is_simple() const { return is_int() || is_uint() || is_float() || is_string(); }
+    bool is_num_can_compare() const { return is_int_or_uint() || is_float() || is_ip(); }
 };
 
 /// IDataType helpers (alternative for IDataType virtual methods with single point of truth)
 
-inline bool is_date(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_date();
-}
-inline bool is_date_v2(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_date_v2();
-}
-inline bool is_date_time_v2(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_date_time_v2();
-}
-inline bool is_date_or_datetime(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_date_or_datetime();
-}
-inline bool is_date_v2_or_datetime_v2(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_date_v2_or_datetime_v2();
-}
-inline bool is_decimal(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_decimal();
-}
-inline bool is_decimal_v2(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_decimal128();
-}
-inline bool is_tuple(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_tuple();
-}
-inline bool is_array(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_array();
-}
-inline bool is_map(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_map();
-}
-inline bool is_struct(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_struct();
-}
-inline bool is_nothing(const DataTypePtr& data_type) {
-    return WhichDataType(data_type).is_nothing();
-}
+#define IS_DATATYPE(name, method)                         \
+    inline bool is_##name(const DataTypePtr& data_type) { \
+        return WhichDataType(data_type).is_##method();    \
+    }
+
+IS_DATATYPE(uint8, uint8)
+IS_DATATYPE(uint16, uint16)
+IS_DATATYPE(uint32, uint32)
+IS_DATATYPE(uint64, uint64)
+IS_DATATYPE(uint128, uint128)
+IS_DATATYPE(int8, int8)
+IS_DATATYPE(int16, int16)
+IS_DATATYPE(int32, int32)
+IS_DATATYPE(int64, int64)
+IS_DATATYPE(int128, int128)
+IS_DATATYPE(date, date)
+IS_DATATYPE(date_v2, date_v2)
+IS_DATATYPE(date_time_v2, date_time_v2)
+IS_DATATYPE(date_or_datetime, date_or_datetime)
+IS_DATATYPE(date_v2_or_datetime_v2, date_v2_or_datetime_v2)
+IS_DATATYPE(decimal, decimal)
+IS_DATATYPE(decimal_v2, decimal128v2)
+IS_DATATYPE(tuple, tuple)
+IS_DATATYPE(array, array)
+IS_DATATYPE(map, map)
+IS_DATATYPE(struct, struct)
+IS_DATATYPE(ipv4, ipv4)
+IS_DATATYPE(ipv6, ipv6)
+IS_DATATYPE(ip, ip)
+IS_DATATYPE(nothing, nothing)
 
 template <typename T>
 bool is_uint8(const T& data_type) {
@@ -405,14 +376,21 @@ inline bool is_not_decimal_but_comparable_to_decimal(const DataTypePtr& data_typ
     return which.is_int() || which.is_uint();
 }
 
-inline bool is_compilable_type(const DataTypePtr& data_type) {
-    return data_type->is_value_represented_by_number() && !is_decimal(data_type);
-}
-
 inline bool is_complex_type(const DataTypePtr& data_type) {
     WhichDataType which(data_type);
     return which.is_array() || which.is_map() || which.is_struct();
 }
 
+inline bool is_variant_type(const DataTypePtr& data_type) {
+    return WhichDataType(data_type).is_variant_type();
+}
+
+// write const_flag and row_num to buf, and return real_need_copy_num
+char* serialize_const_flag_and_row_num(const IColumn** column, char* buf,
+                                       size_t* real_need_copy_num);
+const char* deserialize_const_flag_and_row_num(const char* buf, MutableColumnPtr* column,
+                                               size_t* real_have_saved_num);
 } // namespace vectorized
+
+#include "common/compile_check_end.h"
 } // namespace doris

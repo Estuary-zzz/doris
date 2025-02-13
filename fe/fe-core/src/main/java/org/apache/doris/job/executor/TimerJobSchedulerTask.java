@@ -18,15 +18,15 @@
 package org.apache.doris.job.executor;
 
 import org.apache.doris.job.base.AbstractJob;
+import org.apache.doris.job.common.JobStatus;
 import org.apache.doris.job.disruptor.TaskDisruptor;
 
 import io.netty.util.Timeout;
 import io.netty.util.TimerTask;
-import jline.internal.Log;
-import lombok.extern.slf4j.Slf4j;
+import lombok.extern.log4j.Log4j2;
 
-@Slf4j
-public class TimerJobSchedulerTask<T extends AbstractJob<?>> implements TimerTask {
+@Log4j2
+public class TimerJobSchedulerTask<T extends AbstractJob> implements TimerTask {
 
     private TaskDisruptor dispatchDisruptor;
 
@@ -40,9 +40,24 @@ public class TimerJobSchedulerTask<T extends AbstractJob<?>> implements TimerTas
     @Override
     public void run(Timeout timeout) {
         try {
-            dispatchDisruptor.publishEvent(this.job);
+            if (!JobStatus.RUNNING.equals(job.getJobStatus())) {
+                log.info("job status is not running, job id is {}, skip dispatch", this.job.getJobId());
+                return;
+            }
+            if (!dispatchDisruptor.publishEvent(this.job)) {
+                log.warn("dispatch timer job failed, queue maybe full. job id is {}, job name is {}",
+                        this.job.getJobId(), this.job.getJobName() + getMsgWhenExecuteQueueFull());
+            }
+            log.info("dispatch timer job success, job id is {}, job name is {}", this.job.getJobId(),
+                    this.job.getJobName());
         } catch (Exception e) {
-            Log.warn("dispatch timer job error, task id is {}", this.job.getJobId(), e);
+            log.warn("dispatch timer job error, task id is {}", this.job.getJobId(), e);
         }
+    }
+
+    private String getMsgWhenExecuteQueueFull() {
+        return "you can increase the queue size by setting the property "
+                + "job_dispatch_timer_job_queue_size in the fe.conf file or increase the value of "
+                + "the property job_dispatch_timer_job_thread_num in the fe.conf file";
     }
 }

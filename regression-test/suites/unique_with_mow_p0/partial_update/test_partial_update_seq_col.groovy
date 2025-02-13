@@ -24,7 +24,7 @@ suite("test_primary_key_partial_update_seq_col", "p0") {
     for (def use_row_store : [false, true]) {
         logger.info("current params: use_row_store: ${use_row_store}")
 
-        connect(user = context.config.jdbcUser, password = context.config.jdbcPassword, url = context.config.jdbcUrl) {
+        connect( context.config.jdbcUser, context.config.jdbcPassword, context.config.jdbcUrl) {
             sql "use ${db};"
 
             def tableName = "test_primary_key_partial_update_seq_col"
@@ -128,7 +128,10 @@ suite("test_primary_key_partial_update_seq_col", "p0") {
             sql "sync"
 
             qt_partial_update_with_seq_hidden_columns """
-                select * from ${tableName} order by id;
+                select id, name, score, test, dft, update_time, __DORIS_DELETE_SIGN__, __DORIS_VERSION_COL__,
+                       __DORIS_SEQUENCE_COL__
+                from ${tableName}
+                order by id;
             """
 
             // drop drop
@@ -136,9 +139,9 @@ suite("test_primary_key_partial_update_seq_col", "p0") {
 
 
             def tableName2 = "nereids_partial_update_native_insert_seq_col2"
-            sql """ DROP TABLE IF EXISTS ${tableName2} """
+            sql """ DROP TABLE IF EXISTS nereids_partial_update_20231227 """
             sql """
-                    CREATE TABLE ${tableName2} (
+                    CREATE TABLE nereids_partial_update_20231227 (
                         `id` int(11) NOT NULL COMMENT "用户 ID",
                         `score` int(11) NOT NULL COMMENT "用户得分",
                         `update_time` DATETIMEV2 NULL DEFAULT CURRENT_TIMESTAMP)
@@ -152,7 +155,7 @@ suite("test_primary_key_partial_update_seq_col", "p0") {
             // the input data don't contains sequence mapping column but the sequence mapping
             // column's default value is CURRENT_TIMESTAMP, will load successfully
             streamLoad {
-                table "${tableName2}"
+                table "nereids_partial_update_20231227"
 
                 set 'column_separator', ','
                 set 'format', 'csv'
@@ -161,8 +164,11 @@ suite("test_primary_key_partial_update_seq_col", "p0") {
                 file 'basic.csv'
                 time 10000 // limit inflight 10s
             }
-            qt_sql """ select id,score from ${tableName2} order by id;"""
-            sql """ DROP TABLE IF EXISTS ${tableName2}; """
+
+            sql "sync"
+
+            qt_sql """ select id,score from nereids_partial_update_20231227 order by id;"""
+            sql """ DROP TABLE IF EXISTS nereids_partial_update_20231227; """
         }
     }
 }

@@ -66,6 +66,15 @@ suite("test_stream_load", "p0") {
 
         file 'test_strict_mode.csv'
         time 10000 // limit inflight 10s
+        check { result, exception, startTime, endTime ->
+            if (exception != null) {
+                throw exception
+            }
+            log.info("Stream load result: ${result}".toString())
+            def json = parseJson(result)
+            assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
+        }
     }
 
     sql "sync"
@@ -90,12 +99,44 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("fail", json.Status.toLowerCase())
+            assertTrue(result.contains("ErrorURL"))
+            assertEquals(2, json.NumberTotalRows)
+            assertEquals(1, json.NumberFilteredRows)
+        }
+    }
+
+    sql "truncate table ${tableName}"
+    sql "sync"
+
+    streamLoad {
+        table "${tableName}"
+
+        set 'column_separator', '\t'
+        set 'columns', 'k1, k2, v2, v10, v11'
+        set 'partitions', 'partition_a, partition_b, partition_c, partition_d'
+        set 'strict_mode', 'true'
+        set 'max_filter_ratio', '0.5'
+
+        file 'test_strict_mode_fail.csv'
+        time 10000 // limit inflight 10s
+
+        check { result, exception, startTime, endTime ->
+            if (exception != null) {
+                throw exception
+            }
+            log.info("Stream load result: ${result}".toString())
+            def json = parseJson(result)
+            assertEquals("success", json.Status.toLowerCase())
+            assertTrue(result.contains("ErrorURL"))
             assertEquals(2, json.NumberTotalRows)
             assertEquals(1, json.NumberFilteredRows)
         }
     }
 
     sql "sync"
+
+    qt_sql_strict_mode_ratio "select * from ${tableName} order by k1, k2"
+
     sql """ DROP TABLE IF EXISTS ${tableName} """
     sql """
         CREATE TABLE IF NOT EXISTS ${tableName} (
@@ -130,13 +171,14 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(3, json.NumberTotalRows)
             assertEquals(0, json.NumberFilteredRows)
         }
     }
 
     sql "sync"
-    rowCount = sql "select count(1) from ${tableName}"
+    def rowCount = sql "select count(1) from ${tableName}"
     assertEquals(3, rowCount[0][0])
 
     // test load_nullable_to_not_nullable
@@ -180,6 +222,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(1, json.NumberTotalRows)
             assertEquals(0, json.NumberFilteredRows)
         }
@@ -198,6 +241,8 @@ suite("test_stream_load", "p0") {
     def tableName11 = "test_map"
     def tableName12 = "test_num_as_string"
     def tableName17 = "test_trim_double_quotes"
+    def tableName18 = "test_temporary_partitions"
+
 
     sql """ DROP TABLE IF EXISTS ${tableName3} """
     sql """ DROP TABLE IF EXISTS ${tableName4} """
@@ -209,6 +254,7 @@ suite("test_stream_load", "p0") {
     sql """ DROP TABLE IF EXISTS ${tableName11} """
     sql """ DROP TABLE IF EXISTS ${tableName12} """
     sql """ DROP TABLE IF EXISTS ${tableName17} """
+    sql """ DROP TABLE IF EXISTS ${tableName18} """
     sql """
     CREATE TABLE IF NOT EXISTS ${tableName3} (
       `k1` int(11) NULL,
@@ -364,6 +410,20 @@ suite("test_stream_load", "p0") {
     );
     """
 
+    sql """
+    CREATE TABLE IF NOT EXISTS ${tableName18} (
+      `k1` int(11) NULL,
+      `k2` float NULL,
+      `k3` double NULL
+    ) ENGINE=OLAP
+    DUPLICATE KEY(`k1`)
+    DISTRIBUTED BY HASH(`k1`) BUCKETS 3
+    PROPERTIES (
+    "replication_allocation" = "tag.location.default: 1"
+    );
+    """
+    sql """ ALTER TABLE ${tableName18} ADD TEMPORARY PARTITION test; """
+
     // test num_as_string
     streamLoad {
         table "${tableName12}"
@@ -381,6 +441,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
         }
     }
     sql "sync"
@@ -406,6 +467,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
         }
     }
     sql "sync"
@@ -427,6 +489,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(4, json.NumberTotalRows)
             assertEquals(0, json.NumberFilteredRows)
         }
@@ -450,6 +513,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(2500, json.NumberTotalRows)
             assertEquals(0, json.NumberFilteredRows)
         }
@@ -477,6 +541,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("fail", json.Status.toLowerCase())
+            assertTrue(result.contains("ErrorURL"))
             assertEquals(0, json.NumberLoadedRows)
         }
     }
@@ -500,6 +565,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(2500, json.NumberTotalRows)
             assertEquals(2500, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -532,6 +598,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(2500, json.NumberTotalRows)
             assertEquals(11, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -562,6 +629,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(2500, json.NumberTotalRows)
             assertEquals(2500, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -592,6 +660,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(result.contains("ErrorURL"))
             assertEquals(2500, json.NumberTotalRows)
             assertEquals(0, json.NumberLoadedRows)
             assertEquals(2500, json.NumberFilteredRows)
@@ -648,6 +717,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(1025, json.NumberTotalRows)
             assertEquals(1025, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -676,6 +746,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(8001, json.NumberTotalRows)
             assertEquals(8001, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -707,6 +778,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(6, json.NumberTotalRows)
             assertEquals(6, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -735,6 +807,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(5, json.NumberTotalRows)
             assertEquals(5, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -764,7 +837,7 @@ suite("test_stream_load", "p0") {
             def json = parseJson(result)
             assertEquals("fail", json.Status.toLowerCase())
             assertEquals(5, json.NumberTotalRows)
-            assertEquals(3, json.NumberLoadedRows)
+            assertEquals(0, json.NumberLoadedRows)
             assertEquals(2, json.NumberFilteredRows)
             assertEquals(0, json.NumberUnselectedRows)
         }
@@ -787,8 +860,9 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
-            assertEquals(9, json.NumberTotalRows)
-            assertEquals(9, json.NumberLoadedRows)
+            assertTrue(!result.contains("ErrorURL"))
+            assertEquals(10, json.NumberTotalRows)
+            assertEquals(10, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
             assertEquals(0, json.NumberUnselectedRows)
         }
@@ -837,6 +911,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(5, json.NumberTotalRows)
             assertEquals(5, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
@@ -866,7 +941,7 @@ suite("test_stream_load", "p0") {
             def json = parseJson(result)
             assertEquals("fail", json.Status.toLowerCase())
             assertEquals(5, json.NumberTotalRows)
-            assertEquals(3, json.NumberLoadedRows)
+            assertEquals(0, json.NumberLoadedRows)
             assertEquals(2, json.NumberFilteredRows)
             assertEquals(0, json.NumberUnselectedRows)
         }
@@ -889,8 +964,9 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
-            assertEquals(13, json.NumberTotalRows)
-            assertEquals(13, json.NumberLoadedRows)
+            assertTrue(!result.contains("ErrorURL"))
+            assertEquals(14, json.NumberTotalRows)
+            assertEquals(14, json.NumberLoadedRows)
             assertEquals(0, json.NumberFilteredRows)
             assertEquals(0, json.NumberUnselectedRows)
         }
@@ -943,6 +1019,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(11, json.NumberTotalRows)
             assertEquals(0, json.NumberFilteredRows)
             assertEquals(5, json.NumberUnselectedRows)
@@ -974,8 +1051,16 @@ suite("test_stream_load", "p0") {
         PROPERTIES ("replication_allocation" = "tag.location.default: 1");
     """
 
-    sql """create USER common_user@'%' IDENTIFIED BY '123456'"""
+    sql """create USER common_user@'%' IDENTIFIED BY '123456test!'"""
     sql """GRANT LOAD_PRIV ON *.* TO 'common_user'@'%';"""
+
+     //cloud-mode
+    if (isCloudMode()) {
+        def clusters = sql " SHOW CLUSTERS; "
+        assertTrue(!clusters.isEmpty())
+        def validCluster = clusters[0][0]
+        sql """GRANT USAGE_PRIV ON CLUSTER `${validCluster}` TO common_user""";
+    }
 
     streamLoad {
         table "${tableName13}"
@@ -983,7 +1068,7 @@ suite("test_stream_load", "p0") {
         set 'column_separator', '|'
         set 'columns', 'k1, k2, v1, v2, v3'
         set 'strict_mode', 'true'
-        set 'Authorization', 'Basic  Y29tbW9uX3VzZXI6MTIzNDU2'
+        set 'Authorization', 'Basic Y29tbW9uX3VzZXJAJyUnOjEyMzQ1NnRlc3Qh'
 
         file 'test_auth.csv'
         time 10000 // limit inflight 10s
@@ -995,6 +1080,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(2, json.NumberTotalRows)
             assertEquals(0, json.NumberFilteredRows)
             assertEquals(0, json.NumberUnselectedRows)
@@ -1037,6 +1123,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
             assertEquals(2, json.NumberTotalRows)
             assertEquals(0, json.NumberFilteredRows)
             assertEquals(0, json.NumberUnselectedRows)
@@ -1079,8 +1166,8 @@ suite("test_stream_load", "p0") {
 
     sql "sync"
     def res = sql "select * from ${tableName14}"
-    def time = res[0][5].toString().split("T")[0].split("-")
-    def year = time[0].toString()
+    def ts = res[0][5].toString().split("T")[0].split("-")
+    def year = ts[0].toString()
     SimpleDateFormat sdf= new SimpleDateFormat("yyyy-MM-dd")
     def now = sdf.format(new Date()).toString().split("-")
 
@@ -1111,6 +1198,7 @@ suite("test_stream_load", "p0") {
             requestBuilder.setHeader("Expect", "100-Continue")
             requestBuilder.setHeader("label", "${label}")
             requestBuilder.setHeader("txn_operation", "${txn_operation}")
+            log.info("stream load request " + requestBuilder.toString())
 
             String backendStreamLoadUri = null
             client.execute(requestBuilder.build()).withCloseable { resp ->
@@ -1177,6 +1265,7 @@ suite("test_stream_load", "p0") {
                 log.info("Stream load result: ${result}".toString())
                 def json = parseJson(result)
                 assertEquals("success", json.Status.toLowerCase())
+                assertTrue(!result.contains("ErrorURL"))
                 assertEquals(2, json.NumberTotalRows)
                 assertEquals(0, json.NumberFilteredRows)
                 assertEquals(0, json.NumberUnselectedRows)
@@ -1206,6 +1295,7 @@ suite("test_stream_load", "p0") {
                 log.info("Stream load result: ${result}".toString())
                 def json = parseJson(result)
                 assertEquals("success", json.Status.toLowerCase())
+                assertTrue(!result.contains("ErrorURL"))
                 assertEquals(2, json.NumberTotalRows)
                 assertEquals(0, json.NumberFilteredRows)
                 assertEquals(0, json.NumberUnselectedRows)
@@ -1254,11 +1344,11 @@ suite("test_stream_load", "p0") {
         def command = "curl --location-trusted -u ${context.config.feHttpUser}:${context.config.feHttpPassword} -H column_separator:| -H Transfer-Encoding:chunked -H columns:k1,k2,v1,v2,v3  -T ${context.dataPath}/test_chunked_transfer.csv http://${context.config.feHttpAddress}/api/${db}/${tableName16}/_stream_load"
         log.info("test chunked transfer command: ${command}")
         def process = command.execute()
-        code = process.waitFor()
-        out = process.text
-        json2pc = parseJson(out)
+        def code = process.waitFor()
+        def out = process.text
+        def json2pc = parseJson(out)
         log.info("test chunked transfer result: ${out}".toString())
-
+        sql "sync"
         qt_sql_chunked_transfer_csv "select * from ${tableName16} order by k1"
     } finally {
         sql """ DROP TABLE IF EXISTS ${tableName16} FORCE"""
@@ -1282,11 +1372,11 @@ suite("test_stream_load", "p0") {
         def command = "curl --location-trusted -u ${context.config.feHttpUser}:${context.config.feHttpPassword} -H Transfer-Encoding:chunked -H format:json -H read_json_by_line:true -T ${context.dataPath}/test_chunked_transfer.json http://${context.config.feHttpAddress}/api/${db}/${tableName16}/_stream_load"
         log.info("test chunked transfer command: ${command}")
         def process = command.execute()
-        code = process.waitFor()
-        out = process.text
-        json2pc = parseJson(out)
+        def code = process.waitFor()
+        def out = process.text
+        def json2pc = parseJson(out)
         log.info("test chunked transfer result: ${out}".toString())
-
+        sql "sync"
         qt_sql_chunked_transfer_json "select * from ${tableName16} order by k1"
     } finally {
         sql """ DROP TABLE IF EXISTS ${tableName16} FORCE"""
@@ -1323,6 +1413,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
         }
     }
     sql "sync"
@@ -1344,6 +1435,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
         }
     }
     sql "sync"
@@ -1400,6 +1492,7 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
         }
     }
 
@@ -1417,7 +1510,187 @@ suite("test_stream_load", "p0") {
             log.info("Stream load result: ${result}".toString())
             def json = parseJson(result)
             assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
         }
     }
+
+    // test temporary_partitions
+    streamLoad {
+        table "${tableName18}"
+
+        set 'format', 'JSON'
+        set 'strip_outer_array', 'true'
+        set 'temporary_partitions', 'test'
+        file 'num_as_string.json'
+
+        check { result, exception, startTime, endTime ->
+            if (exception != null) {
+                throw exception
+            }
+            log.info("Stream load result: ${result}".toString())
+            def json = parseJson(result)
+            assertEquals("success", json.Status.toLowerCase())
+            assertTrue(!result.contains("ErrorURL"))
+        }
+    }
+    sql "sync"
+    order_qt_temporary_partitions "SELECT * FROM ${tableName18} TEMPORARY PARTITION(test) order by k1"
+
+    // test length of input is too long than schema.
+    def tableName19 = "test_input_long_than_schema"
+    try {
+        sql """ DROP TABLE IF EXISTS ${tableName19} """
+        sql """
+            CREATE TABLE IF NOT EXISTS ${tableName19} (
+                `c1` varchar(48) NULL,
+                `c2` varchar(48) NULL,
+                `c3` varchar(48) NULL,
+                `c4` varchar(48) NULL,
+                `c5` varchar(48) NULL,
+                `c6` varchar(48) NULL,
+                `c7` varchar(48) NULL,
+                `c8` varchar(48) NULL,
+                `c9` varchar(48) NULL,
+                `c10` varchar(48) NULL,
+                `c11` varchar(48) NULL,
+                `c12` varchar(48) NULL,
+                `c13` varchar(48) NULL,
+                `c14` varchar(48) NULL,
+                `c15` varchar(48) NULL,
+                `c16` varchar(48) NULL,
+                `c17` varchar(48) NULL,
+                `c18` varchar(48) NULL,
+                `c19` varchar(48) NULL,
+                `c20` varchar(48) NULL,
+                `c21` varchar(48) NULL,
+                `c22` varchar(48) NULL,
+                `c23` varchar(48) NULL,
+                `c24` varchar(48) NULL,
+                `c25` varchar(48) NULL,
+                `c26` varchar(48) NULL,
+                `c27` varchar(48) NULL,
+                `c28` varchar(48) NULL,
+                `c29` varchar(48) NULL,
+                `c30` varchar(48) NULL,
+                `c31` varchar(48) NULL,
+                `c32` varchar(48) NULL,
+                `c33` varchar(48) NULL,
+                `c34` varchar(48) NULL,
+                `c35` varchar(48) NULL,
+                `c36` varchar(48) NULL,
+                `c37` varchar(48) NULL,
+                `c38` varchar(48) NULL,
+                `c39` varchar(48) NULL,
+                `c40` varchar(48) NULL,
+                `c41` varchar(48) NULL,
+                `c42` varchar(48) NULL,
+                `c43` varchar(48) NULL,
+                `c44` varchar(48) NULL,
+                `c45` varchar(48) NULL,
+                `c46` varchar(48) NULL,
+                `c47` varchar(48) NULL,
+                `c48` varchar(48) NULL,
+                `c49` varchar(48) NULL,
+                `c50` varchar(48) NULL
+            ) ENGINE=OLAP
+            DUPLICATE KEY(`c1`)
+            COMMENT 'OLAP'
+            DISTRIBUTED BY HASH(`c1`) BUCKETS AUTO
+            PROPERTIES (
+            "replication_allocation" = "tag.location.default: 1",
+            "disable_auto_compaction" = "false"
+            );
+        """
+
+        streamLoad {
+            table "${tableName19}"
+            set 'column_separator', ','
+            file 'test_input_long_than_schema.csv'
+
+            check { result, exception, startTime, endTime ->
+                if (exception != null) {
+                    throw exception
+                }
+                log.info("Stream load result: ${result}".toString())
+                def json = parseJson(result)
+                assertEquals("fail", json.Status.toLowerCase())
+                assertTrue(result.contains("ErrorURL"))
+                assertTrue(json.Message.contains("Encountered unqualified data, stop processing"))
+            }
+        }
+    } finally {
+        sql """ DROP TABLE IF EXISTS ${tableName19} FORCE"""
+    }
+
+   def sql_result = sql """ select Host, HttpPort from backends() where alive = true limit 1; """
+  
+   log.info(sql_result[0][0].toString())
+   log.info(sql_result[0][1].toString())
+   log.info(sql_result[0].size.toString())
+
+   def beHost=sql_result[0][0]
+   def beHttpPort=sql_result[0][1]
+   log.info("${beHost}".toString())
+   log.info("${beHttpPort}".toString());
+
+    //test be : chunked transfer + Content Length
+    try {
+       sql """ DROP TABLE IF EXISTS ${tableName16} """
+       sql """
+           CREATE TABLE IF NOT EXISTS ${tableName16} (
+               `k1` bigint(20) NULL DEFAULT "1",
+               `k2` bigint(20) NULL ,
+               `v1` tinyint(4) NULL,
+               `v2` tinyint(4) NULL,
+               `v3` tinyint(4) NULL,
+               `v4` DATETIME NULL
+           ) ENGINE=OLAP
+           DISTRIBUTED BY HASH(`k1`) BUCKETS 3
+           PROPERTIES ("replication_allocation" = "tag.location.default: 1");
+       """
+   
+       def command = "curl --location-trusted -u ${context.config.feHttpUser}:${context.config.feHttpPassword} -H column_separator:| -H ${db}:${tableName16} -H Content-Length:0  -H Transfer-Encoding:chunked -H columns:k1,k2,v1,v2,v3 -T ${context.dataPath}/test_chunked_transfer.csv http://${beHost}:${beHttpPort}/api/${db}/${tableName16}/_stream_load"
+       log.info("test chunked transfer command: ${command}")
+       def process = command.execute()
+       def code = process.waitFor()
+       def out = process.text
+       log.info("test chunked transfer result: ${out}".toString())
+       def json = parseJson(out)
+       assertEquals("fail", json.Status.toLowerCase())
+       assertTrue(json.Message.contains("please do not set both content_length and transfer-encoding"))
+    } finally {
+       sql """ DROP TABLE IF EXISTS ${tableName16} FORCE"""
+    }
+
+
+    //test be : no chunked transfer + no Content Length
+    try {
+        sql """ DROP TABLE IF EXISTS ${tableName16} """
+        sql """
+            CREATE TABLE IF NOT EXISTS ${tableName16} (
+                `k1` bigint(20) NULL DEFAULT "1",
+                `k2` bigint(20) NULL ,
+                `v1` tinyint(4) NULL,
+                `v2` tinyint(4) NULL,
+                `v3` tinyint(4) NULL,
+                `v4` DATETIME NULL
+            ) ENGINE=OLAP
+            DISTRIBUTED BY HASH(`k1`) BUCKETS 3
+            PROPERTIES ("replication_allocation" = "tag.location.default: 1");
+        """
+
+        def command = "curl --location-trusted -u ${context.config.feHttpUser}:${context.config.feHttpPassword} -H column_separator:| -H ${db}:${tableName16} -H Content-Length:  -H Transfer-Encoding: -T ${context.dataPath}/test_chunked_transfer.csv http://${beHost}:${beHttpPort}/api/${db}/${tableName16}/_stream_load"
+        log.info("test chunked transfer command: ${command}")
+        def process = command.execute()
+        def code = process.waitFor()
+        def out = process.text
+        log.info("test chunked transfer result: ${out}".toString())
+        def json = parseJson(out)
+        assertEquals("fail", json.Status.toLowerCase())
+        assertTrue(json.Message.contains("content_length is empty and transfer-encoding!=chunked, please set content_length or transfer-encoding=chunked"))
+    } finally {
+        sql """ DROP TABLE IF EXISTS ${tableName16} FORCE"""
+    }
+
 }
 

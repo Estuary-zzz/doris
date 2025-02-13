@@ -73,7 +73,7 @@ public:
     }
 
     Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                        size_t result, size_t input_rows_count) const override {
+                        uint32_t result, size_t input_rows_count) const override {
         // For default implementation of nulls args
         ColumnsWithTypeAndName args = {block.get_by_position(arguments[0]),
                                        block.get_by_position(arguments[1])};
@@ -102,18 +102,18 @@ private:
 
         PaddedPODArray<UInt8>* dst_null_map = nullptr;
         MutableColumnPtr array_nested_column = nullptr;
-        IColumn* dst_column;
+        IColumn* dst_column = nullptr;
         if (nested_null_map) {
             auto dst_nested_column =
                     ColumnNullable::create(nested_column.clone_empty(), ColumnUInt8::create());
             array_nested_column = dst_nested_column->get_ptr();
-            dst_column = dst_nested_column->get_nested_column_ptr();
+            dst_column = dst_nested_column->get_nested_column_ptr().get();
             dst_null_map = &dst_nested_column->get_null_map_data();
             dst_null_map->reserve(offsets.back());
         } else {
             auto dst_nested_column = nested_column.clone_empty();
             array_nested_column = dst_nested_column->get_ptr();
-            dst_column = dst_nested_column;
+            dst_column = dst_nested_column.get();
         }
 
         auto& dst_data = reinterpret_cast<NestedColumnType&>(*dst_column).get_data();
@@ -174,18 +174,18 @@ private:
 
         PaddedPODArray<UInt8>* dst_null_map = nullptr;
         MutableColumnPtr array_nested_column = nullptr;
-        IColumn* dst_column;
+        IColumn* dst_column = nullptr;
         if (nested_null_map) {
             auto dst_nested_column =
                     ColumnNullable::create(nested_column.clone_empty(), ColumnUInt8::create());
             array_nested_column = dst_nested_column->get_ptr();
-            dst_column = dst_nested_column->get_nested_column_ptr();
+            dst_column = dst_nested_column->get_nested_column_ptr().get();
             dst_null_map = &dst_nested_column->get_null_map_data();
             dst_null_map->reserve(offsets.back());
         } else {
             auto dst_nested_column = nested_column.clone_empty();
             array_nested_column = dst_nested_column->get_ptr();
-            dst_column = dst_nested_column;
+            dst_column = dst_nested_column.get();
         }
 
         auto& dst_offs = reinterpret_cast<ColumnString&>(*dst_column).get_offsets();
@@ -323,12 +323,12 @@ private:
             } else if (left_which_type.is_decimal64()) {
                 res = _execute_number_expanded<ColumnDecimal64>(offsets, *nested_column,
                                                                 *right_column, nested_null_map);
-            } else if (left_which_type.is_decimal128i()) {
-                res = _execute_number_expanded<ColumnDecimal128I>(offsets, *nested_column,
-                                                                  *right_column, nested_null_map);
-            } else if (left_which_type.is_decimal128()) {
-                res = _execute_number_expanded<ColumnDecimal128>(offsets, *nested_column,
-                                                                 *right_column, nested_null_map);
+            } else if (left_which_type.is_decimal128v3()) {
+                res = _execute_number_expanded<ColumnDecimal128V3>(offsets, *nested_column,
+                                                                   *right_column, nested_null_map);
+            } else if (left_which_type.is_decimal128v2()) {
+                res = _execute_number_expanded<ColumnDecimal128V2>(offsets, *nested_column,
+                                                                   *right_column, nested_null_map);
             } else if (left_which_type.is_decimal256()) {
                 res = _execute_number_expanded<ColumnDecimal256>(offsets, *nested_column,
                                                                  *right_column, nested_null_map);

@@ -18,7 +18,7 @@
 suite("test_primary_key_partial_update_parallel", "p0") {
 
     // case 1: concurrent partial update
-    def tableName = "test_primary_key_partial_update"
+    def tableName = "test_primary_key_partial_update_parallel"
     sql """ DROP TABLE IF EXISTS ${tableName} """
     sql """
             CREATE TABLE ${tableName} (
@@ -38,7 +38,7 @@ suite("test_primary_key_partial_update_parallel", "p0") {
         (4, "doris4", 4000, 423, 4),
         (3, "doris3", 3000, 323, 3);"""
 
-    t1 = Thread.startDaemon {
+    def t1 = Thread.startDaemon {
         streamLoad {
             table "${tableName}"
 
@@ -52,7 +52,7 @@ suite("test_primary_key_partial_update_parallel", "p0") {
         }
     }
 
-    t2 = Thread.startDaemon {
+    def t2 = Thread.startDaemon {
         streamLoad {
             table "${tableName}"
 
@@ -66,7 +66,7 @@ suite("test_primary_key_partial_update_parallel", "p0") {
         }
     }
 
-    t3 = Thread.startDaemon {
+    def t3 = Thread.startDaemon {
         streamLoad {
             table "${tableName}"
 
@@ -92,7 +92,7 @@ suite("test_primary_key_partial_update_parallel", "p0") {
 
 
     // case 2: concurrent partial update with row store column
-    tableName = "test_primary_key_row_store_partial_update"
+    tableName = "test_primary_key_row_store_partial_update_parallel"
     sql """ DROP TABLE IF EXISTS ${tableName} """
     sql """
             CREATE TABLE ${tableName} (
@@ -166,7 +166,7 @@ suite("test_primary_key_partial_update_parallel", "p0") {
 
 
     // case 3: concurrent partial update with sequence column
-    tableName = "test_primary_key_seq_partial_update"
+    tableName = "test_primary_key_seq_partial_update_parallel"
 
     // create table
     sql """ DROP TABLE IF EXISTS ${tableName} """
@@ -241,17 +241,12 @@ suite("test_primary_key_partial_update_parallel", "p0") {
     t2.join()
     t3.join()
 
-    sql "set show_hidden_columns=true;"
-    sql "sync"
-
-    qt_sql """ select * from ${tableName} order by id;"""
-    sql "set show_hidden_columns=false;"
-    sql "sync"
+    qt_sql """ select id,name,score,test,dft,__DORIS_DELETE_SIGN__,__DORIS_VERSION_COL__,__DORIS_SEQUENCE_COL__ from ${tableName} order by id;"""
     sql """ DROP TABLE IF EXISTS ${tableName}; """
 
 
     // case 4: concurrent partial update with row store column and sequence column
-    tableName = "test_primary_key_row_store_seq_partial_update"
+    tableName = "test_primary_key_row_store_seq_partial_update_parallel"
     sql """ DROP TABLE IF EXISTS ${tableName} """
     sql """
             CREATE TABLE ${tableName} (
@@ -333,7 +328,7 @@ suite("test_primary_key_partial_update_parallel", "p0") {
     sql """ DROP TABLE IF EXISTS ${tableName}; """
 
     // case 5: partial update with delete sign in parallel
-    tableName = "test_primary_key_partial_update_delete_sign"
+    tableName = "test_primary_key_partial_update_parallel_delete_sign"
     sql """ DROP TABLE IF EXISTS ${tableName} """
     sql """
             CREATE TABLE ${tableName} (

@@ -17,12 +17,14 @@
 
 #include "conjunction_query.h"
 
-#include <cstdint>
+namespace doris::segment_v2 {
 
-namespace doris {
-
-ConjunctionQuery::ConjunctionQuery(IndexReader* reader)
-        : _reader(reader), _index_version(reader->getIndexVersion()) {}
+ConjunctionQuery::ConjunctionQuery(const std::shared_ptr<lucene::search::IndexSearcher>& searcher,
+                                   const TQueryOptions& query_options, const io::IOContext* io_ctx)
+        : _searcher(searcher),
+          _io_ctx(io_ctx),
+          _index_version(_searcher->getReader()->getIndexVersion()),
+          _conjunction_ratio(query_options.inverted_index_conjunction_opt_threshold) {}
 
 ConjunctionQuery::~ConjunctionQuery() {
     for (auto& term_doc : _term_docs) {
@@ -38,16 +40,16 @@ ConjunctionQuery::~ConjunctionQuery() {
 }
 
 void ConjunctionQuery::add(const std::wstring& field_name, const std::vector<std::string>& terms) {
-    if (terms.size() < 1) {
-        _CLTHROWA(CL_ERR_IllegalArgument, "ConjunctionQuery::add: terms.size() < 1");
+    if (terms.empty()) {
+        _CLTHROWA(CL_ERR_IllegalArgument, "ConjunctionQuery::add: terms empty");
     }
 
     std::vector<TermIterator> iterators;
-    for (auto& term : terms) {
+    for (const auto& term : terms) {
         std::wstring ws_term = StringUtil::string_to_wstring(term);
         Term* t = _CLNEW Term(field_name.c_str(), ws_term.c_str());
         _terms.push_back(t);
-        TermDocs* term_doc = _reader->termDocs(t);
+        TermDocs* term_doc = _searcher->getReader()->termDocs(t, _io_ctx);
         _term_docs.push_back(term_doc);
         iterators.emplace_back(term_doc);
     }
@@ -123,8 +125,7 @@ void ConjunctionQuery::search_by_bitmap(roaring::Roaring& roaring) {
 
 void ConjunctionQuery::search_by_skiplist(roaring::Roaring& roaring) {
     int32_t doc = 0;
-    int32_t first_doc = _lead1.nextDoc();
-    while ((doc = do_next(first_doc)) != INT32_MAX) {
+    while ((doc = do_next(_lead1.nextDoc())) != INT32_MAX) {
         roaring.add(doc);
     }
 }
@@ -166,4 +167,4 @@ int32_t ConjunctionQuery::do_next(int32_t doc) {
     }
 }
 
-} // namespace doris
+} // namespace doris::segment_v2

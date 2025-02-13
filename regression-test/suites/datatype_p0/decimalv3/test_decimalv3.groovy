@@ -27,6 +27,11 @@ suite("test_decimalv3") {
 
     qt_decimalv3 "select * from test5_v"
     qt_decimalv3 "select cast(a as decimalv3(12,10)) * cast(b as decimalv3(18,10)) from test5"
+    qt_decimalv3_view1 "select count(*) from test5_v;"
+
+    sql "drop view if exists test5_v2"
+    sql "create view test5_v2 (amout) as select cast(a as decimalv3(18,6)) from test5"
+    qt_decimalv3_view2 "select count(*) from test5_v2;"
 
     /*
     sql "drop table if exists test_decimal256;"
@@ -45,7 +50,6 @@ suite("test_decimalv3") {
     qt_decimalv3_6 "select * from test_decimal256 where v1 <= 9999999999999999999999999999999999999999999999999999999999999999999999.999999 order by k1, v1; "
 	*/
 
-    sql "set experimental_enable_nereids_planner =false;"
     qt_aEb_test1 "select 0e0;"
     qt_aEb_test2 "select 1e-1"
     qt_aEb_test3 "select -1e-2"
@@ -53,17 +57,11 @@ suite("test_decimalv3") {
     qt_aEb_test5 "select 123456789e-10"
     qt_aEb_test6 "select 0.123445e10;"
 
-    sql "set enable_nereids_planner = true;"
     sql "set enable_decimal256 = true;"
     qt_decimal256_cast_0 """ select cast("999999.999999" as decimal(76,6));"""
     qt_decimal256_cast_1 """select cast("9999999999999999999999999999999999999999999999999999999999999999999999.999999" as decimal(76,6));"""
 
     // test const
-
-    // nereids
-    sql "set enable_nereids_planner = true;"
-
-    sql """ set enable_fallback_to_original_planner=false """
     sql "set enable_decimal256 = true;"
     qt_decimal256_const_0 "select 1.4E-45;"
     qt_decimal256_const_1 "select 1.4E-80;"
@@ -71,7 +69,6 @@ suite("test_decimalv3") {
     qt_decimal256_const_2 "select 1.4E-45;"
     qt_decimal256_const_3 "select 1.4E-80;"
 
-    sql """ set enable_fallback_to_original_planner=true """
     sql "set enable_decimal256 = true;"
     qt_decimal256_const_4 "select 1.4E-45;"
     qt_decimal256_const_5 "select 1.4E-80;"
@@ -79,16 +76,6 @@ suite("test_decimalv3") {
     qt_decimal256_const_6 "select 1.4E-45;"
     qt_decimal256_const_7 "select 1.4E-80;"
 
-    // not nereids
-    sql "set enable_nereids_planner = false;"
-    sql "set enable_decimal256 = true;"
-    qt_decimal256_const_8 "select 1.4E-45;"
-    qt_decimal256_const_9 "select 1.4E-80;"
-    sql "set enable_decimal256 = false;"
-    qt_decimal256_const_10 "select 1.4E-45;"
-    qt_decimal256_const_11 "select 1.4E-80;"
-
-    sql "set enable_nereids_planner = true;"
     sql "set enable_decimal256 = true;"
     sql "drop table if exists test_decimal256_cast_str;"
     sql """ create table test_decimal256_cast_str(k1 int, v1 char(128))

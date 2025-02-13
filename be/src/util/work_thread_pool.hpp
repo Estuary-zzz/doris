@@ -18,11 +18,9 @@
 #pragma once
 
 #include <mutex>
-#include <thread>
 
 #include "util/blocking_priority_queue.hpp"
 #include "util/blocking_queue.hpp"
-#include "util/lock.h"
 #include "util/thread.h"
 #include "util/thread_group.h"
 
@@ -127,12 +125,13 @@ public:
     }
 
     std::string get_info() const {
-        return fmt::format(
-                "PriorityThreadPool(name={}, queue_size={}/{}, active_thread={}/{}, "
-                "total_get_wait_time={}, total_put_wait_time={})",
-                _name, get_queue_size(), _work_queue.get_capacity(), _active_threads,
-                _threads.size(), _work_queue.total_get_wait_time(),
-                _work_queue.total_put_wait_time());
+        return (Priority ? "PriorityThreadPool" : "FifoThreadPool") +
+               fmt::format(
+                       "(name={}, queue_size={}/{}, active_thread={}/{}, "
+                       "total_get_wait_time={}, total_put_wait_time={})",
+                       _name, get_queue_size(), _work_queue.get_capacity(), _active_threads,
+                       _threads.size(), _work_queue.total_get_wait_time(),
+                       _work_queue.total_put_wait_time());
     }
 
 protected:
@@ -142,10 +141,10 @@ protected:
     ThreadGroup _threads;
 
     // Guards _empty_cv
-    doris::Mutex _lock;
+    std::mutex _lock;
 
     // Signalled when the queue becomes empty
-    doris::ConditionVariable _empty_cv;
+    std::condition_variable _empty_cv;
 
 private:
     // Driver method for each thread in the pool. Continues to read work from the queue

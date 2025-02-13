@@ -49,7 +49,7 @@ public:
 template <PrimitiveType Type, PredicateType PT, typename ConditionType>
 class IntegerPredicateCreator : public PredicateCreator<ConditionType> {
 public:
-    using CppType = typename PredicatePrimitiveTypeTraits<Type>::PredicateFieldType;
+    using CppType = typename PrimitiveTypeTraits<Type>::CppType;
     ColumnPredicate* create(const TabletColumn& column, int index, const ConditionType& conditions,
                             bool opposite, vectorized::Arena* arena) override {
         if constexpr (PredicateTypeTraits::is_list(PT)) {
@@ -79,7 +79,7 @@ private:
 template <PrimitiveType Type, PredicateType PT, typename ConditionType>
 class DecimalPredicateCreator : public PredicateCreator<ConditionType> {
 public:
-    using CppType = typename PredicatePrimitiveTypeTraits<Type>::PredicateFieldType;
+    using CppType = typename PrimitiveTypeTraits<Type>::CppType;
     ColumnPredicate* create(const TabletColumn& column, int index, const ConditionType& conditions,
                             bool opposite, vectorized::Arena* arena) override {
         if constexpr (PredicateTypeTraits::is_list(PT)) {
@@ -135,7 +135,7 @@ private:
 template <PrimitiveType Type, PredicateType PT, typename ConditionType>
 struct CustomPredicateCreator : public PredicateCreator<ConditionType> {
 public:
-    using CppType = typename PredicatePrimitiveTypeTraits<Type>::PredicateFieldType;
+    using CppType = typename PrimitiveTypeTraits<Type>::CppType;
     CustomPredicateCreator(const std::function<CppType(const std::string& condition)>& convert)
             : _convert(convert) {}
 
@@ -183,7 +183,9 @@ std::unique_ptr<PredicateCreator<ConditionType>> get_creator(const FieldType& ty
                 [](const std::string& condition) {
                     decimal12_t value = {0, 0};
                     static_cast<void>(value.from_string(condition));
-                    return value;
+                    // Decimal12t is storage type, we need convert to compute type here to
+                    // do comparisons
+                    return DecimalV2Value(value.integer, value.fraction);
                 });
     }
     case FieldType::OLAP_FIELD_TYPE_DECIMAL32: {
@@ -240,7 +242,7 @@ std::unique_ptr<PredicateCreator<ConditionType>> get_creator(const FieldType& ty
     case FieldType::OLAP_FIELD_TYPE_IPV4: {
         return std::make_unique<CustomPredicateCreator<TYPE_IPV4, PT, ConditionType>>(
                 [](const std::string& condition) {
-                    vectorized::IPv4 value;
+                    IPv4 value;
                     bool res = IPv4Value::from_string(value, condition);
                     DCHECK(res);
                     return value;
@@ -249,7 +251,7 @@ std::unique_ptr<PredicateCreator<ConditionType>> get_creator(const FieldType& ty
     case FieldType::OLAP_FIELD_TYPE_IPV6: {
         return std::make_unique<CustomPredicateCreator<TYPE_IPV6, PT, ConditionType>>(
                 [](const std::string& condition) {
-                    vectorized::IPv6 value;
+                    IPv6 value;
                     bool res = IPv6Value::from_string(value, condition);
                     DCHECK(res);
                     return value;
